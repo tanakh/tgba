@@ -117,8 +117,6 @@ impl Registers {
     }
 
     fn set_cpsr(&mut self, cpsr: u32) {
-        let old_mode = self.mode;
-
         self.n_flag = (cpsr >> 31) & 1 != 0;
         self.z_flag = (cpsr >> 30) & 1 != 0;
         self.c_flag = (cpsr >> 29) & 1 != 0;
@@ -126,7 +124,6 @@ impl Registers {
         self.irq_disable = (cpsr >> 7) & 1 != 0;
         self.fiq_disable = (cpsr >> 6) & 1 != 0;
         self.state = (cpsr >> 5) & 1 != 0;
-        self.mode = cpsr as u8 & 0b11111;
 
         self.change_mode((cpsr & 0b11111) as u8);
     }
@@ -148,6 +145,7 @@ impl Registers {
         if self.mode != mode {
             self.save_regs();
             self.mode = mode;
+            assert!(self.is_valid_mode());
             self.restore_regs();
         }
     }
@@ -707,47 +705,99 @@ fn arm_op_b<C: Context, const L: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u3
     cpu.set_pc(old_pc.wrapping_add(offset as u32));
 }
 
-fn decode_reg_sft_imm(cpu: &mut Cpu<impl Context>, instr: u32) -> u32 {
+fn decode_reg_sft_imm(cpu: &mut Cpu<impl Context>, instr: u32) -> (u32, bool) {
     assert!(instr & 0x10 == 0);
 
     let rm = cpu.regs.r[(instr & 0xF) as usize];
     let shift_type = (instr >> 5) & 3;
     let amount = (instr >> 7) & 0x1F;
 
+    if shift_type == 0 && amount == 0 {
+        // LSL #0 is a special case, where the shifter carry out is the old value of the CPSR C flag.
+        // The contents of Rm are used directly as the second operand
+
+        (rm, cpu.regs.c_flag)
+    } else if shift_type == 3 && amount == 0 {
+        // The form of the shift field which might be expected to give ROR #0 is used to encode a special function of the barrel shifter, rotate right extended (RRX). This is a rotate right by one bit position of the 33 bit quantity formed by appending the CPSR C flag to the most significant end of the contents of Rm as shown in ➲Figure 4-10: Rotate right extended.
+        let old_c = cpu.regs.c_flag as u32;
+        ((rm >> 1) | (old_c << 31), rm & 1 != 0)
+    } else {
+        // The form of the shift field which might be expected to correspond to LSR #0 is used to encode LSR #32, which has a zero result with bit 31 of Rm as the carry output.
+        // The form of the shift field which might be expected to give ASR #0 is used to encode ASR #32. Bit 31 of Rm is again used as the carry output, and each bit of operand 2 is also equal to bit 31 of Rm. The result is therefore all ones or all zeros, according to the value of bit 31 of Rm
+        calc_sft(shift_type, rm, if amount == 0 { 32 } else { amount as u8 })
+    }
+}
+
+fn decode_reg_sft_reg(cpu: &mut Cpu<impl Context>, instr: u32) -> (u32, bool) {
+    assert!(instr & 0x10 != 0);
+
+    let rm = cpu.regs.r[(instr & 0xF) as usize];
+    let shift_type = (instr >> 5) & 0x3;
+
+    let rs = ((instr >> 8) & 0xF) as usize;
+    // Rs can be any general register other than R15
+    assert_ne!(rs, 15);
+    // Only the least significant byte of the contents of Rs is used to determine the shift amount.
+    let amount = cpu.regs.r[rs] as u8;
+
+    // If this byte is zero, the unchanged contents of Rm will be used as the second operand, and the old value of the CPSR C flag will be passed on as the shifter carry output.
+
+    if amount == 0 {
+        (rm, cpu.regs.c_flag)
+    } else {
+        calc_sft(shift_type, rm, amount)
+    }
+}
+
+fn calc_sft(shift_type: u32, a: u32, b: u8) -> (u32, bool) {
+    assert_ne!(b, 0);
     match shift_type {
-        0 => rm << amount,
-        1 => rm >> amount,
-        2 => ((rm as i32) >> amount) as u32,
-        3 => {
-            if amount == 0 {
-                // FIXME: ???
-                let old_c = cpu.regs.c_flag as u32;
-                cpu.regs.c_flag = rm & 1 != 0;
-                (rm >> 1) | (old_c << 31)
+        // LSL
+        0 => {
+            if b < 32 {
+                (a << b, (a >> (32 - b)) & 1 != 0)
+            } else if b == 32 {
+                (0, a & 1 != 0)
             } else {
-                rm.rotate_right(amount)
+                (0, false)
             }
+        }
+        // LSR
+        1 => {
+            if b < 32 {
+                (a >> b, (a >> (b - 1)) & 1 != 0)
+            } else if b == 32 {
+                (0, (a >> 31) & 1 != 0)
+            } else {
+                (0, false)
+            }
+        }
+        // ASR
+        2 => {
+            if b < 32 {
+                (((a as i32) >> b) as u32, (a >> (b - 1)) & 1 != 0)
+            } else if (a >> 31) & 1 == 0 {
+                (0, false)
+            } else {
+                (!0, true)
+            }
+        }
+        // ROR
+        3 => {
+            let b = b & 0x1F;
+            let data = a.rotate_right((b & 0x1F) as u32);
+            let carry = if b > 0 {
+                (a >> (b - 1)) & 1 != 0
+            } else {
+                (a >> 31) & 1 != 0
+            };
+            (data, carry)
         }
         _ => unreachable!(),
     }
 }
 
-fn decode_reg_sft_reg(cpu: &mut Cpu<impl Context>, instr: u32) -> u32 {
-    assert!(instr & 0x10 != 0);
-
-    let rm = cpu.regs.r[(instr & 0xF) as usize];
-    let shift_type = (instr >> 5) & 0x3;
-    let amount = cpu.regs.r[((instr >> 8) & 0xF) as usize];
-    match shift_type {
-        0 => rm << amount,
-        1 => rm >> amount,
-        2 => ((rm as i32) >> amount) as u32,
-        3 => rm.rotate_right(amount),
-        _ => unreachable!(),
-    }
-}
-
-fn decode_reg_sft(cpu: &mut Cpu<impl Context>, instr: u32) -> u32 {
+fn decode_reg_sft(cpu: &mut Cpu<impl Context>, instr: u32) -> (u32, bool) {
     if instr & 0x10 == 0 {
         decode_reg_sft_imm(cpu, instr)
     } else {
@@ -755,70 +805,165 @@ fn decode_reg_sft(cpu: &mut Cpu<impl Context>, instr: u32) -> u32 {
     }
 }
 
-fn decode_op2<C: Context, const I: bool>(cpu: &mut Cpu<C>, instr: u32) -> u32 {
-    // FIXME: flags
+fn decode_op2<C: Context, const I: bool>(cpu: &mut Cpu<C>, instr: u32) -> (u32, bool) {
     if !I {
         decode_reg_sft(cpu, instr)
     } else {
         let imm = instr & 0xFF;
         let rot = (instr >> 8) & 0xF;
-        imm.rotate_right(rot * 2)
+        // FIXME: flags?
+        (imm.rotate_right(rot * 2), false)
     }
 }
 
-fn alu<C: Context, const O: u8>(cpu: &mut Cpu<C>, op1: u32, op2: u32) -> u32 {
-    match O {
-        0b0000 => op1 & op2,
-        0b0001 => op1 ^ op2,
-        0b0010 => op1.wrapping_sub(op2),
-        0b0011 => op2.wrapping_sub(op1),
-        0b0100 => op1.wrapping_add(op2),
-        0b0101 => op1.wrapping_add(op2).wrapping_add(cpu.regs.c_flag as u32),
-        0b0110 => op1
-            .wrapping_sub(op2)
-            .wrapping_add(cpu.regs.c_flag as u32)
-            .wrapping_sub(1),
-        0b0111 => op2
-            .wrapping_sub(op1)
-            .wrapping_add(cpu.regs.c_flag as u32)
-            .wrapping_sub(1),
-        0b1000 => unreachable!(),
-        0b1001 => unreachable!(),
-        0b1010 => unreachable!(),
-        0b1011 => unreachable!(),
-        0b1100 => op1 | op2,
-        0b1101 => op2,
-        0b1110 => op1 & !op2,
-        0b1111 => !op2,
-        _ => unreachable!(),
-    }
+fn add_with_flag(a: u32, b: u32, c: bool) -> (u32, bool, bool) {
+    let (ret, carry1) = a.overflowing_add(b);
+    let (ret, carry2) = ret.overflowing_add(c as u32);
+
+    let (tmp, overflow1) = (a as i32).overflowing_add(b as i32);
+    let (_, overflow2) = tmp.overflowing_add(c as i32);
+
+    (ret, carry1 || carry2, overflow1 || overflow2)
 }
 
-fn alu_with_flag<C: Context, const O: u8>(cpu: &mut Cpu<C>, op1: u32, op2: u32) -> u32 {
-    match O {
-        0b0000 => op1 & op2,
-        0b0001 => op1 ^ op2,
-        0b0010 => op1.wrapping_sub(op2),
-        0b0011 => op2.wrapping_sub(op1),
-        0b0100 => op1.wrapping_add(op2),
-        0b0101 => op1.wrapping_add(op2).wrapping_add(cpu.regs.c_flag as u32),
-        0b0110 => op1
-            .wrapping_sub(op2)
-            .wrapping_add(cpu.regs.c_flag as u32)
-            .wrapping_sub(1),
-        0b0111 => op2
-            .wrapping_sub(op1)
-            .wrapping_add(cpu.regs.c_flag as u32)
-            .wrapping_sub(1),
-        0b1000 => unreachable!(),
-        0b1001 => unreachable!(),
-        0b1010 => unreachable!(),
-        0b1011 => unreachable!(),
-        0b1100 => op1 | op2,
-        0b1101 => op2,
-        0b1110 => op1 & !op2,
-        0b1111 => !op2,
+fn sub_with_flag(a: u32, b: u32, c: bool) -> (u32, bool, bool) {
+    let (ret, carry1) = a.overflowing_sub(b);
+    let (ret, carry2) = ret.overflowing_sub(1 - c as u32);
+
+    let (tmp, overflow1) = (a as i32).overflowing_sub(b as i32);
+    let (_, overflow2) = tmp.overflowing_sub(1 - c as i32);
+
+    (ret, !(carry1 || carry2), !(overflow1 || overflow2))
+}
+
+fn alu<C: Context, const O: u8>(
+    cpu: &mut Cpu<C>,
+    op1: u32,
+    op2: u32,
+    change_flag: bool,
+) -> Option<u32> {
+    let (ret, cmp) = match O {
+        // AND
+        0b0000 => (op1 & op2, false),
+        // EOR
+        0b0001 => (op1 ^ op2, false),
+        // SUB
+        0b0010 => {
+            if !change_flag {
+                (op1.wrapping_sub(op2), false)
+            } else {
+                let (ret, carry, overflow) = sub_with_flag(op1, op2, true);
+                cpu.regs.c_flag = carry;
+                cpu.regs.v_flag = overflow;
+                (ret, false)
+            }
+        }
+        // RSB
+        0b0011 => {
+            if !change_flag {
+                (op2.wrapping_sub(op1), false)
+            } else {
+                let (ret, carry, overflow) = sub_with_flag(op2, op1, true);
+                cpu.regs.c_flag = carry;
+                cpu.regs.v_flag = overflow;
+                (ret, false)
+            }
+        }
+        // ADD
+        0b0100 => {
+            if !change_flag {
+                (op1.wrapping_add(op2), false)
+            } else {
+                let (ret, carry, overflow) = add_with_flag(op1, op2, false);
+                cpu.regs.c_flag = carry;
+                cpu.regs.v_flag = overflow;
+                (ret, false)
+            }
+        }
+        // ADC
+        0b0101 => {
+            if !change_flag {
+                (
+                    op1.wrapping_add(op2).wrapping_add(cpu.regs.c_flag as u32),
+                    false,
+                )
+            } else {
+                let (ret, carry, overflow) = add_with_flag(op1, op2, cpu.regs.c_flag);
+                cpu.regs.c_flag = carry;
+                cpu.regs.v_flag = overflow;
+                (ret, false)
+            }
+        }
+        // SBC
+        0b0110 => {
+            if !change_flag {
+                let borrow = 1 - cpu.regs.c_flag as u32;
+                (op1.wrapping_sub(op2).wrapping_sub(borrow), false)
+            } else {
+                let (ret, carry, overflow) = sub_with_flag(op1, op2, cpu.regs.c_flag);
+                cpu.regs.c_flag = carry;
+                cpu.regs.v_flag = overflow;
+                (ret, false)
+            }
+        }
+        // RSC
+        0b0111 => {
+            if !change_flag {
+                let borrow = 1 - cpu.regs.c_flag as u32;
+                (op2.wrapping_sub(op1).wrapping_sub(borrow), false)
+            } else {
+                let (ret, carry, overflow) = sub_with_flag(op2, op1, cpu.regs.c_flag);
+                cpu.regs.c_flag = carry;
+                cpu.regs.v_flag = overflow;
+                (ret, false)
+            }
+        }
+        // TST
+        0b1000 => {
+            assert!(change_flag);
+            (op1 & op2, true)
+        }
+        // TEQ
+        0b1001 => {
+            assert!(change_flag);
+            (op1 ^ op2, true)
+        }
+        // CMP
+        0b1010 => {
+            assert!(change_flag);
+            let (ret, carry, overflow) = sub_with_flag(op1, op2, true);
+            cpu.regs.c_flag = carry;
+            cpu.regs.v_flag = overflow;
+            (ret, true)
+        }
+        // CMN
+        0b1011 => {
+            assert!(change_flag);
+            let (ret, carry, overflow) = add_with_flag(op1, op2, false);
+            cpu.regs.c_flag = carry;
+            cpu.regs.v_flag = overflow;
+            (ret, true)
+        }
+        // ORR
+        0b1100 => (op1 | op2, false),
+        // MOV
+        0b1101 => (op2, false),
+        // BIC
+        0b1110 => (op1 & !op2, false),
+        // MVN
+        0b1111 => (!op2, false),
+
         _ => unreachable!(),
+    };
+
+    if change_flag {
+        cpu.regs.set_nz(ret);
+    }
+
+    if !cmp {
+        Some(ret)
+    } else {
+        None
     }
 }
 
@@ -830,25 +975,24 @@ fn arm_op_alu<C: Context, const I: bool, const S: bool, const O: u8>(
     let rn = ((instr >> 16) & 0xf) as usize;
     let rd = ((instr >> 12) & 0xf) as usize;
 
+    let change_flag = S && rd != 15;
+
     let op1 = cpu.regs.r[rn];
-    let op2 = decode_op2::<C, I>(cpu, instr);
 
-    let res = if !S {
-        alu::<C, O>(cpu, op1, op2)
-    } else {
-        alu_with_flag::<C, O>(cpu, op1, op2)
-    };
+    let (op2, carry) = decode_op2::<C, I>(cpu, instr);
+    if change_flag {
+        cpu.regs.c_flag = carry;
+    }
 
-    if rd != 15 {
-        cpu.regs.r[rd] = res;
-        if S {
-            todo!()
-        }
-    } else {
-        cpu.set_pc(res);
-        if S {
-            assert!(cpu.regs.mode != MODE_USER);
-            cpu.regs.set_cpsr(cpu.regs.spsr);
+    if let Some(res) = alu::<C, O>(cpu, op1, op2, change_flag) {
+        if rd != 15 {
+            cpu.regs.r[rd] = res;
+        } else {
+            cpu.set_pc(res);
+            if S {
+                assert!(cpu.regs.mode != MODE_USER);
+                cpu.regs.set_cpsr(cpu.regs.spsr);
+            }
         }
     }
 }
@@ -875,7 +1019,7 @@ fn arm_op_msr<C: Context, const I: bool, const S: bool>(
     } else {
         assert!(instr & 0x0FBEF000 == 0x0328F000);
     }
-    let src = decode_op2::<C, I>(cpu, instr);
+    let src = decode_op2::<C, I>(cpu, instr).0;
     if !S {
         if flg == 0 {
             cpu.regs.spsr = src;
@@ -983,7 +1127,7 @@ fn arm_op_mull<C: Context, const U: bool, const A: bool, const S: bool>(
 
 trait Data {
     fn load(ctx: &mut impl Context, addr: u32) -> u32;
-    fn store(ctx: &mut impl Context, addr: u32, data: u32) {
+    fn store(_ctx: &mut impl Context, _addr: u32, _data: u32) {
         panic!()
     }
 }
@@ -1057,7 +1201,7 @@ fn arm_op_ldst<
     let offset = if !I {
         instr & 0xFFF
     } else {
-        decode_reg_sft_imm(cpu, instr)
+        decode_reg_sft_imm(cpu, instr).0
     };
 
     let base = cpu.regs.r[rn];
@@ -1323,7 +1467,11 @@ fn disasm(instr: u32, pc: u32) -> String {
             let imm = instr & 0xFF;
             let rot = (instr >> 8) & 0xF;
             let opr = imm.rotate_right(rot * 2);
-            return Some(format!("#0x{opr:X}"));
+            return if opr < 10 {
+                Some(format!("#{opr}"))
+            } else {
+                Some(format!("#0x{opr:X}"))
+            };
         }
 
         let rm = instr & 0xF;
