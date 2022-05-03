@@ -9,11 +9,14 @@ use crate::{
 trait_alias!(pub trait Context = Bus + Interrupt);
 
 type ArmOp<C> = fn(&mut Cpu<C>, &mut C, u32);
+type ArmDisasm = fn(u32, u32) -> String;
 
 pub struct Cpu<C: Context> {
     regs: Registers,
     pc_changed: bool,
+
     arm_op_table: [ArmOp<C>; 0x1000],
+    arm_disasm_table: [ArmDisasm; 0x1000],
 }
 
 enum Exception {
@@ -226,10 +229,13 @@ fn reg_bank(mode: u8) -> (&'static [usize; 16], Option<usize>) {
 
 impl<C: Context> Cpu<C> {
     pub fn new() -> Self {
+        let (arm_op_table, arm_disasm_table) = build_arm_table();
+
         Cpu {
             regs: Registers::default(),
             pc_changed: false,
-            arm_op_table: build_arm_op_table(),
+            arm_op_table,
+            arm_disasm_table,
         }
     }
 
@@ -270,7 +276,7 @@ impl<C: Context> Cpu<C> {
 
         if log::log_enabled!(log::Level::Trace) {
             let pc = self.regs.r[15].wrapping_sub(4);
-            let s = disasm(instr, pc);
+            let s = self.disasm(instr, pc);
             trace!(
                 "{pc:08X}: {instr:08X}: {s:24} CPSR:{n}{z}{c}{v}{i}{f}{t}",
                 n = if self.regs.n_flag { 'N' } else { 'n' },
@@ -309,8 +315,9 @@ impl<C: Context> Cpu<C> {
     }
 }
 
-fn build_arm_op_table<C: Context>() -> [ArmOp<C>; 0x1000] {
-    let mut tbl = [arm_op_invalid as ArmOp<C>; 0x1000];
+fn build_arm_table<C: Context>() -> ([ArmOp<C>; 0x1000], [ArmDisasm; 0x1000]) {
+    let mut op_tbl = [arm_op_invalid as ArmOp<C>; 0x1000];
+    let mut disasm_tbl = [arm_disasm_invalid as ArmDisasm; 0x1000];
 
     let invalid = |hi: usize, lo: usize| {
         trace!(
@@ -452,56 +459,58 @@ fn build_arm_op_table<C: Context>() -> [ArmOp<C>; 0x1000] {
         }
 
         for lo in 0..0x10 {
-            tbl[(hi << 4) | lo] = match hi >> 5 {
+            let (op, disasm): (ArmOp<C>, ArmDisasm) = match hi >> 5 {
                 0b000 => {
                     if hi == 0b00010010 && lo == 0b0001 {
-                        arm_op_bx
+                        (arm_op_bx, arm_disasm_bx)
                     } else if lo == 0b1001 {
                         match hi {
-                            0b000_00 => arm_op_mul::<C, false, false>,
-                            0b000_01 => arm_op_mul::<C, false, true>,
-                            0b000_10 => arm_op_mul::<C, true, false>,
-                            0b000_11 => arm_op_mul::<C, true, true>,
+                            0b000_00 => (arm_op_mul::<C, false, false>, arm_disasm_mul),
+                            0b000_01 => (arm_op_mul::<C, false, true>, arm_disasm_mul),
+                            0b000_10 => (arm_op_mul::<C, true, false>, arm_disasm_mul),
+                            0b000_11 => (arm_op_mul::<C, true, true>, arm_disasm_mul),
 
-                            0b01_000 => arm_op_mull::<C, false, false, false>,
-                            0b01_001 => arm_op_mull::<C, false, false, true>,
-                            0b01_010 => arm_op_mull::<C, false, true, false>,
-                            0b01_011 => arm_op_mull::<C, false, true, true>,
-                            0b01_100 => arm_op_mull::<C, true, false, false>,
-                            0b01_101 => arm_op_mull::<C, true, false, true>,
-                            0b01_110 => arm_op_mull::<C, true, true, false>,
-                            0b01_111 => arm_op_mull::<C, true, true, true>,
+                            0b01_000 => (arm_op_mull::<C, false, false, false>, arm_disasm_mull),
+                            0b01_001 => (arm_op_mull::<C, false, false, true>, arm_disasm_mull),
+                            0b01_010 => (arm_op_mull::<C, false, true, false>, arm_disasm_mull),
+                            0b01_011 => (arm_op_mull::<C, false, true, true>, arm_disasm_mull),
+                            0b01_100 => (arm_op_mull::<C, true, false, false>, arm_disasm_mull),
+                            0b01_101 => (arm_op_mull::<C, true, false, true>, arm_disasm_mull),
+                            0b01_110 => (arm_op_mull::<C, true, true, false>, arm_disasm_mull),
+                            0b01_111 => (arm_op_mull::<C, true, true, true>, arm_disasm_mull),
 
-                            0b10_0_00 => arm_op_swp::<C, false>,
-                            0b10_1_00 => arm_op_swp::<C, true>,
+                            0b10_0_00 => (arm_op_swp::<C, false>, arm_disasm_swp),
+                            0b10_1_00 => (arm_op_swp::<C, true>, arm_disasm_swp),
 
-                            _ => invalid(hi, lo),
+                            _ => (invalid(hi, lo), arm_disasm_invalid),
                         }
                     } else if lo == 0b1011 {
-                        ldsth!(u16)
+                        (ldsth!(u16), arm_disasm_ldsth)
                     } else if lo == 0b1101 {
-                        ldsth!(i8)
+                        (ldsth!(i8), arm_disasm_ldsth)
                     } else if lo == 0b1111 {
-                        ldsth!(i16)
+                        (ldsth!(i16), arm_disasm_ldsth)
                     } else if hi & 0b000_1100_1 == 0b000_1000_0 {
                         // compare with s = 0
                         if hi & 0b000_1101_1 == 0b000_1000_0 && lo == 0 {
-                            if hi & 0b000_1111_0 == 0b000_1000_0 {
+                            let op = if hi & 0b000_1111_0 == 0b000_1000_0 {
                                 arm_op_mrs::<C, false>
                             } else {
                                 arm_op_mrs::<C, true>
-                            }
+                            };
+                            (op, arm_disasm_mrs)
                         } else if hi & 0b000_1101_1 == 0b000_1001_0 {
-                            if hi & 0b000_1111_1 == 0b000_1001_0 {
+                            let op = if hi & 0b000_1111_1 == 0b000_1001_0 {
                                 arm_op_msr::<C, false, false>
                             } else {
                                 arm_op_msr::<C, false, true>
-                            }
+                            };
+                            (op, arm_disasm_msr)
                         } else {
-                            invalid(hi, lo)
+                            (invalid(hi, lo), arm_disasm_invalid)
                         }
                     } else {
-                        alu!()
+                        (alu!(), arm_disasm_alu)
                     }
                 }
 
@@ -509,190 +518,204 @@ fn build_arm_op_table<C: Context>() -> [ArmOp<C>; 0x1000] {
                     if hi & 0b000_1100_1 == 0b000_1000_0 {
                         // compare with s = 0
                         if hi & 0b000_1101_1 == 0b000_1001_0 {
-                            if hi & 0b000_1111_1 == 0b000_1001_0 {
+                            let op = if hi & 0b000_1111_1 == 0b000_1001_0 {
                                 arm_op_msr::<C, true, false>
                             } else {
                                 arm_op_msr::<C, true, true>
-                            }
+                            };
+                            (op, arm_disasm_msr)
                         } else {
-                            invalid(hi, lo)
+                            (invalid(hi, lo), arm_disasm_invalid)
                         }
                     } else {
-                        alu!()
+                        (alu!(), arm_disasm_alu)
                     }
                 }
 
-                0b011 if lo & 1 == 1 => arm_op_undef,
+                0b011 if lo & 1 == 1 => (arm_op_undef, arm_disasm_undef),
 
-                0b010 | 0b011 => match hi {
-                    0b01000000 => arm_op_ldst::<C, false, false, false, false, false, false>,
-                    0b01000001 => arm_op_ldst::<C, false, false, false, false, false, true>,
-                    0b01000010 => arm_op_ldst::<C, false, false, false, false, true, false>,
-                    0b01000011 => arm_op_ldst::<C, false, false, false, false, true, true>,
-                    0b01000100 => arm_op_ldst::<C, false, false, false, true, false, false>,
-                    0b01000101 => arm_op_ldst::<C, false, false, false, true, false, true>,
-                    0b01000110 => arm_op_ldst::<C, false, false, false, true, true, false>,
-                    0b01000111 => arm_op_ldst::<C, false, false, false, true, true, true>,
-                    0b01001000 => arm_op_ldst::<C, false, false, true, false, false, false>,
-                    0b01001001 => arm_op_ldst::<C, false, false, true, false, false, true>,
-                    0b01001010 => arm_op_ldst::<C, false, false, true, false, true, false>,
-                    0b01001011 => arm_op_ldst::<C, false, false, true, false, true, true>,
-                    0b01001100 => arm_op_ldst::<C, false, false, true, true, false, false>,
-                    0b01001101 => arm_op_ldst::<C, false, false, true, true, false, true>,
-                    0b01001110 => arm_op_ldst::<C, false, false, true, true, true, false>,
-                    0b01001111 => arm_op_ldst::<C, false, false, true, true, true, true>,
-                    0b01010000 => arm_op_ldst::<C, false, true, false, false, false, false>,
-                    0b01010001 => arm_op_ldst::<C, false, true, false, false, false, true>,
-                    0b01010010 => arm_op_ldst::<C, false, true, false, false, true, false>,
-                    0b01010011 => arm_op_ldst::<C, false, true, false, false, true, true>,
-                    0b01010100 => arm_op_ldst::<C, false, true, false, true, false, false>,
-                    0b01010101 => arm_op_ldst::<C, false, true, false, true, false, true>,
-                    0b01010110 => arm_op_ldst::<C, false, true, false, true, true, false>,
-                    0b01010111 => arm_op_ldst::<C, false, true, false, true, true, true>,
-                    0b01011000 => arm_op_ldst::<C, false, true, true, false, false, false>,
-                    0b01011001 => arm_op_ldst::<C, false, true, true, false, false, true>,
-                    0b01011010 => arm_op_ldst::<C, false, true, true, false, true, false>,
-                    0b01011011 => arm_op_ldst::<C, false, true, true, false, true, true>,
-                    0b01011100 => arm_op_ldst::<C, false, true, true, true, false, false>,
-                    0b01011101 => arm_op_ldst::<C, false, true, true, true, false, true>,
-                    0b01011110 => arm_op_ldst::<C, false, true, true, true, true, false>,
-                    0b01011111 => arm_op_ldst::<C, false, true, true, true, true, true>,
-                    0b01100000 => arm_op_ldst::<C, true, false, false, false, false, false>,
-                    0b01100001 => arm_op_ldst::<C, true, false, false, false, false, true>,
-                    0b01100010 => arm_op_ldst::<C, true, false, false, false, true, false>,
-                    0b01100011 => arm_op_ldst::<C, true, false, false, false, true, true>,
-                    0b01100100 => arm_op_ldst::<C, true, false, false, true, false, false>,
-                    0b01100101 => arm_op_ldst::<C, true, false, false, true, false, true>,
-                    0b01100110 => arm_op_ldst::<C, true, false, false, true, true, false>,
-                    0b01100111 => arm_op_ldst::<C, true, false, false, true, true, true>,
-                    0b01101000 => arm_op_ldst::<C, true, false, true, false, false, false>,
-                    0b01101001 => arm_op_ldst::<C, true, false, true, false, false, true>,
-                    0b01101010 => arm_op_ldst::<C, true, false, true, false, true, false>,
-                    0b01101011 => arm_op_ldst::<C, true, false, true, false, true, true>,
-                    0b01101100 => arm_op_ldst::<C, true, false, true, true, false, false>,
-                    0b01101101 => arm_op_ldst::<C, true, false, true, true, false, true>,
-                    0b01101110 => arm_op_ldst::<C, true, false, true, true, true, false>,
-                    0b01101111 => arm_op_ldst::<C, true, false, true, true, true, true>,
-                    0b01110000 => arm_op_ldst::<C, true, true, false, false, false, false>,
-                    0b01110001 => arm_op_ldst::<C, true, true, false, false, false, true>,
-                    0b01110010 => arm_op_ldst::<C, true, true, false, false, true, false>,
-                    0b01110011 => arm_op_ldst::<C, true, true, false, false, true, true>,
-                    0b01110100 => arm_op_ldst::<C, true, true, false, true, false, false>,
-                    0b01110101 => arm_op_ldst::<C, true, true, false, true, false, true>,
-                    0b01110110 => arm_op_ldst::<C, true, true, false, true, true, false>,
-                    0b01110111 => arm_op_ldst::<C, true, true, false, true, true, true>,
-                    0b01111000 => arm_op_ldst::<C, true, true, true, false, false, false>,
-                    0b01111001 => arm_op_ldst::<C, true, true, true, false, false, true>,
-                    0b01111010 => arm_op_ldst::<C, true, true, true, false, true, false>,
-                    0b01111011 => arm_op_ldst::<C, true, true, true, false, true, true>,
-                    0b01111100 => arm_op_ldst::<C, true, true, true, true, false, false>,
-                    0b01111101 => arm_op_ldst::<C, true, true, true, true, false, true>,
-                    0b01111110 => arm_op_ldst::<C, true, true, true, true, true, false>,
-                    0b01111111 => arm_op_ldst::<C, true, true, true, true, true, true>,
-                    _ => unreachable!(),
-                },
+                0b010 | 0b011 => {
+                    let op = match hi {
+                        0b01000000 => arm_op_ldst::<C, false, false, false, false, false, false>,
+                        0b01000001 => arm_op_ldst::<C, false, false, false, false, false, true>,
+                        0b01000010 => arm_op_ldst::<C, false, false, false, false, true, false>,
+                        0b01000011 => arm_op_ldst::<C, false, false, false, false, true, true>,
+                        0b01000100 => arm_op_ldst::<C, false, false, false, true, false, false>,
+                        0b01000101 => arm_op_ldst::<C, false, false, false, true, false, true>,
+                        0b01000110 => arm_op_ldst::<C, false, false, false, true, true, false>,
+                        0b01000111 => arm_op_ldst::<C, false, false, false, true, true, true>,
+                        0b01001000 => arm_op_ldst::<C, false, false, true, false, false, false>,
+                        0b01001001 => arm_op_ldst::<C, false, false, true, false, false, true>,
+                        0b01001010 => arm_op_ldst::<C, false, false, true, false, true, false>,
+                        0b01001011 => arm_op_ldst::<C, false, false, true, false, true, true>,
+                        0b01001100 => arm_op_ldst::<C, false, false, true, true, false, false>,
+                        0b01001101 => arm_op_ldst::<C, false, false, true, true, false, true>,
+                        0b01001110 => arm_op_ldst::<C, false, false, true, true, true, false>,
+                        0b01001111 => arm_op_ldst::<C, false, false, true, true, true, true>,
+                        0b01010000 => arm_op_ldst::<C, false, true, false, false, false, false>,
+                        0b01010001 => arm_op_ldst::<C, false, true, false, false, false, true>,
+                        0b01010010 => arm_op_ldst::<C, false, true, false, false, true, false>,
+                        0b01010011 => arm_op_ldst::<C, false, true, false, false, true, true>,
+                        0b01010100 => arm_op_ldst::<C, false, true, false, true, false, false>,
+                        0b01010101 => arm_op_ldst::<C, false, true, false, true, false, true>,
+                        0b01010110 => arm_op_ldst::<C, false, true, false, true, true, false>,
+                        0b01010111 => arm_op_ldst::<C, false, true, false, true, true, true>,
+                        0b01011000 => arm_op_ldst::<C, false, true, true, false, false, false>,
+                        0b01011001 => arm_op_ldst::<C, false, true, true, false, false, true>,
+                        0b01011010 => arm_op_ldst::<C, false, true, true, false, true, false>,
+                        0b01011011 => arm_op_ldst::<C, false, true, true, false, true, true>,
+                        0b01011100 => arm_op_ldst::<C, false, true, true, true, false, false>,
+                        0b01011101 => arm_op_ldst::<C, false, true, true, true, false, true>,
+                        0b01011110 => arm_op_ldst::<C, false, true, true, true, true, false>,
+                        0b01011111 => arm_op_ldst::<C, false, true, true, true, true, true>,
+                        0b01100000 => arm_op_ldst::<C, true, false, false, false, false, false>,
+                        0b01100001 => arm_op_ldst::<C, true, false, false, false, false, true>,
+                        0b01100010 => arm_op_ldst::<C, true, false, false, false, true, false>,
+                        0b01100011 => arm_op_ldst::<C, true, false, false, false, true, true>,
+                        0b01100100 => arm_op_ldst::<C, true, false, false, true, false, false>,
+                        0b01100101 => arm_op_ldst::<C, true, false, false, true, false, true>,
+                        0b01100110 => arm_op_ldst::<C, true, false, false, true, true, false>,
+                        0b01100111 => arm_op_ldst::<C, true, false, false, true, true, true>,
+                        0b01101000 => arm_op_ldst::<C, true, false, true, false, false, false>,
+                        0b01101001 => arm_op_ldst::<C, true, false, true, false, false, true>,
+                        0b01101010 => arm_op_ldst::<C, true, false, true, false, true, false>,
+                        0b01101011 => arm_op_ldst::<C, true, false, true, false, true, true>,
+                        0b01101100 => arm_op_ldst::<C, true, false, true, true, false, false>,
+                        0b01101101 => arm_op_ldst::<C, true, false, true, true, false, true>,
+                        0b01101110 => arm_op_ldst::<C, true, false, true, true, true, false>,
+                        0b01101111 => arm_op_ldst::<C, true, false, true, true, true, true>,
+                        0b01110000 => arm_op_ldst::<C, true, true, false, false, false, false>,
+                        0b01110001 => arm_op_ldst::<C, true, true, false, false, false, true>,
+                        0b01110010 => arm_op_ldst::<C, true, true, false, false, true, false>,
+                        0b01110011 => arm_op_ldst::<C, true, true, false, false, true, true>,
+                        0b01110100 => arm_op_ldst::<C, true, true, false, true, false, false>,
+                        0b01110101 => arm_op_ldst::<C, true, true, false, true, false, true>,
+                        0b01110110 => arm_op_ldst::<C, true, true, false, true, true, false>,
+                        0b01110111 => arm_op_ldst::<C, true, true, false, true, true, true>,
+                        0b01111000 => arm_op_ldst::<C, true, true, true, false, false, false>,
+                        0b01111001 => arm_op_ldst::<C, true, true, true, false, false, true>,
+                        0b01111010 => arm_op_ldst::<C, true, true, true, false, true, false>,
+                        0b01111011 => arm_op_ldst::<C, true, true, true, false, true, true>,
+                        0b01111100 => arm_op_ldst::<C, true, true, true, true, false, false>,
+                        0b01111101 => arm_op_ldst::<C, true, true, true, true, false, true>,
+                        0b01111110 => arm_op_ldst::<C, true, true, true, true, true, false>,
+                        0b01111111 => arm_op_ldst::<C, true, true, true, true, true, true>,
+                        _ => unreachable!(),
+                    };
+                    (op, arm_disasm_ldst)
+                }
 
-                0b100 => match hi {
-                    0b100_00000 => arm_op_ldstm::<C, false, false, false, false, false>,
-                    0b100_00001 => arm_op_ldstm::<C, false, false, false, false, true>,
-                    0b100_00010 => arm_op_ldstm::<C, false, false, false, true, false>,
-                    0b100_00011 => arm_op_ldstm::<C, false, false, false, true, true>,
-                    0b100_00100 => arm_op_ldstm::<C, false, false, true, false, false>,
-                    0b100_00101 => arm_op_ldstm::<C, false, false, true, false, true>,
-                    0b100_00110 => arm_op_ldstm::<C, false, false, true, true, false>,
-                    0b100_00111 => arm_op_ldstm::<C, false, false, true, true, true>,
-                    0b100_01000 => arm_op_ldstm::<C, false, true, false, false, false>,
-                    0b100_01001 => arm_op_ldstm::<C, false, true, false, false, true>,
-                    0b100_01010 => arm_op_ldstm::<C, false, true, false, true, false>,
-                    0b100_01011 => arm_op_ldstm::<C, false, true, false, true, true>,
-                    0b100_01100 => arm_op_ldstm::<C, false, true, true, false, false>,
-                    0b100_01101 => arm_op_ldstm::<C, false, true, true, false, true>,
-                    0b100_01110 => arm_op_ldstm::<C, false, true, true, true, false>,
-                    0b100_01111 => arm_op_ldstm::<C, false, true, true, true, true>,
-                    0b100_10000 => arm_op_ldstm::<C, true, false, false, false, false>,
-                    0b100_10001 => arm_op_ldstm::<C, true, false, false, false, true>,
-                    0b100_10010 => arm_op_ldstm::<C, true, false, false, true, false>,
-                    0b100_10011 => arm_op_ldstm::<C, true, false, false, true, true>,
-                    0b100_10100 => arm_op_ldstm::<C, true, false, true, false, false>,
-                    0b100_10101 => arm_op_ldstm::<C, true, false, true, false, true>,
-                    0b100_10110 => arm_op_ldstm::<C, true, false, true, true, false>,
-                    0b100_10111 => arm_op_ldstm::<C, true, false, true, true, true>,
-                    0b100_11000 => arm_op_ldstm::<C, true, true, false, false, false>,
-                    0b100_11001 => arm_op_ldstm::<C, true, true, false, false, true>,
-                    0b100_11010 => arm_op_ldstm::<C, true, true, false, true, false>,
-                    0b100_11011 => arm_op_ldstm::<C, true, true, false, true, true>,
-                    0b100_11100 => arm_op_ldstm::<C, true, true, true, false, false>,
-                    0b100_11101 => arm_op_ldstm::<C, true, true, true, false, true>,
-                    0b100_11110 => arm_op_ldstm::<C, true, true, true, true, false>,
-                    0b100_11111 => arm_op_ldstm::<C, true, true, true, true, true>,
-                    _ => unreachable!(),
-                },
+                0b100 => {
+                    let op = match hi {
+                        0b100_00000 => arm_op_ldstm::<C, false, false, false, false, false>,
+                        0b100_00001 => arm_op_ldstm::<C, false, false, false, false, true>,
+                        0b100_00010 => arm_op_ldstm::<C, false, false, false, true, false>,
+                        0b100_00011 => arm_op_ldstm::<C, false, false, false, true, true>,
+                        0b100_00100 => arm_op_ldstm::<C, false, false, true, false, false>,
+                        0b100_00101 => arm_op_ldstm::<C, false, false, true, false, true>,
+                        0b100_00110 => arm_op_ldstm::<C, false, false, true, true, false>,
+                        0b100_00111 => arm_op_ldstm::<C, false, false, true, true, true>,
+                        0b100_01000 => arm_op_ldstm::<C, false, true, false, false, false>,
+                        0b100_01001 => arm_op_ldstm::<C, false, true, false, false, true>,
+                        0b100_01010 => arm_op_ldstm::<C, false, true, false, true, false>,
+                        0b100_01011 => arm_op_ldstm::<C, false, true, false, true, true>,
+                        0b100_01100 => arm_op_ldstm::<C, false, true, true, false, false>,
+                        0b100_01101 => arm_op_ldstm::<C, false, true, true, false, true>,
+                        0b100_01110 => arm_op_ldstm::<C, false, true, true, true, false>,
+                        0b100_01111 => arm_op_ldstm::<C, false, true, true, true, true>,
+                        0b100_10000 => arm_op_ldstm::<C, true, false, false, false, false>,
+                        0b100_10001 => arm_op_ldstm::<C, true, false, false, false, true>,
+                        0b100_10010 => arm_op_ldstm::<C, true, false, false, true, false>,
+                        0b100_10011 => arm_op_ldstm::<C, true, false, false, true, true>,
+                        0b100_10100 => arm_op_ldstm::<C, true, false, true, false, false>,
+                        0b100_10101 => arm_op_ldstm::<C, true, false, true, false, true>,
+                        0b100_10110 => arm_op_ldstm::<C, true, false, true, true, false>,
+                        0b100_10111 => arm_op_ldstm::<C, true, false, true, true, true>,
+                        0b100_11000 => arm_op_ldstm::<C, true, true, false, false, false>,
+                        0b100_11001 => arm_op_ldstm::<C, true, true, false, false, true>,
+                        0b100_11010 => arm_op_ldstm::<C, true, true, false, true, false>,
+                        0b100_11011 => arm_op_ldstm::<C, true, true, false, true, true>,
+                        0b100_11100 => arm_op_ldstm::<C, true, true, true, false, false>,
+                        0b100_11101 => arm_op_ldstm::<C, true, true, true, false, true>,
+                        0b100_11110 => arm_op_ldstm::<C, true, true, true, true, false>,
+                        0b100_11111 => arm_op_ldstm::<C, true, true, true, true, true>,
+                        _ => unreachable!(),
+                    };
+                    (op, arm_disasm_ldstm)
+                }
 
                 0b101 => {
-                    if (hi >> 4) & 1 == 0 {
+                    let op = if (hi >> 4) & 1 == 0 {
                         arm_op_b::<C, false>
                     } else {
                         arm_op_b::<C, true>
-                    }
+                    };
+                    (op, arm_disasm_b)
                 }
 
-                0b110 => match hi {
-                    0b110_00000 => arm_op_ldstc::<C, false, false, false, false, false>,
-                    0b110_00001 => arm_op_ldstc::<C, false, false, false, false, true>,
-                    0b110_00010 => arm_op_ldstc::<C, false, false, false, true, false>,
-                    0b110_00011 => arm_op_ldstc::<C, false, false, false, true, true>,
-                    0b110_00100 => arm_op_ldstc::<C, false, false, true, false, false>,
-                    0b110_00101 => arm_op_ldstc::<C, false, false, true, false, true>,
-                    0b110_00110 => arm_op_ldstc::<C, false, false, true, true, false>,
-                    0b110_00111 => arm_op_ldstc::<C, false, false, true, true, true>,
-                    0b110_01000 => arm_op_ldstc::<C, false, true, false, false, false>,
-                    0b110_01001 => arm_op_ldstc::<C, false, true, false, false, true>,
-                    0b110_01010 => arm_op_ldstc::<C, false, true, false, true, false>,
-                    0b110_01011 => arm_op_ldstc::<C, false, true, false, true, true>,
-                    0b110_01100 => arm_op_ldstc::<C, false, true, true, false, false>,
-                    0b110_01101 => arm_op_ldstc::<C, false, true, true, false, true>,
-                    0b110_01110 => arm_op_ldstc::<C, false, true, true, true, false>,
-                    0b110_01111 => arm_op_ldstc::<C, false, true, true, true, true>,
-                    0b110_10000 => arm_op_ldstc::<C, true, false, false, false, false>,
-                    0b110_10001 => arm_op_ldstc::<C, true, false, false, false, true>,
-                    0b110_10010 => arm_op_ldstc::<C, true, false, false, true, false>,
-                    0b110_10011 => arm_op_ldstc::<C, true, false, false, true, true>,
-                    0b110_10100 => arm_op_ldstc::<C, true, false, true, false, false>,
-                    0b110_10101 => arm_op_ldstc::<C, true, false, true, false, true>,
-                    0b110_10110 => arm_op_ldstc::<C, true, false, true, true, false>,
-                    0b110_10111 => arm_op_ldstc::<C, true, false, true, true, true>,
-                    0b110_11000 => arm_op_ldstc::<C, true, true, false, false, false>,
-                    0b110_11001 => arm_op_ldstc::<C, true, true, false, false, true>,
-                    0b110_11010 => arm_op_ldstc::<C, true, true, false, true, false>,
-                    0b110_11011 => arm_op_ldstc::<C, true, true, false, true, true>,
-                    0b110_11100 => arm_op_ldstc::<C, true, true, true, false, false>,
-                    0b110_11101 => arm_op_ldstc::<C, true, true, true, false, true>,
-                    0b110_11110 => arm_op_ldstc::<C, true, true, true, true, false>,
-                    0b110_11111 => arm_op_ldstc::<C, true, true, true, true, true>,
-                    _ => unreachable!(),
-                },
+                0b110 => {
+                    let op = match hi {
+                        0b110_00000 => arm_op_ldstc::<C, false, false, false, false, false>,
+                        0b110_00001 => arm_op_ldstc::<C, false, false, false, false, true>,
+                        0b110_00010 => arm_op_ldstc::<C, false, false, false, true, false>,
+                        0b110_00011 => arm_op_ldstc::<C, false, false, false, true, true>,
+                        0b110_00100 => arm_op_ldstc::<C, false, false, true, false, false>,
+                        0b110_00101 => arm_op_ldstc::<C, false, false, true, false, true>,
+                        0b110_00110 => arm_op_ldstc::<C, false, false, true, true, false>,
+                        0b110_00111 => arm_op_ldstc::<C, false, false, true, true, true>,
+                        0b110_01000 => arm_op_ldstc::<C, false, true, false, false, false>,
+                        0b110_01001 => arm_op_ldstc::<C, false, true, false, false, true>,
+                        0b110_01010 => arm_op_ldstc::<C, false, true, false, true, false>,
+                        0b110_01011 => arm_op_ldstc::<C, false, true, false, true, true>,
+                        0b110_01100 => arm_op_ldstc::<C, false, true, true, false, false>,
+                        0b110_01101 => arm_op_ldstc::<C, false, true, true, false, true>,
+                        0b110_01110 => arm_op_ldstc::<C, false, true, true, true, false>,
+                        0b110_01111 => arm_op_ldstc::<C, false, true, true, true, true>,
+                        0b110_10000 => arm_op_ldstc::<C, true, false, false, false, false>,
+                        0b110_10001 => arm_op_ldstc::<C, true, false, false, false, true>,
+                        0b110_10010 => arm_op_ldstc::<C, true, false, false, true, false>,
+                        0b110_10011 => arm_op_ldstc::<C, true, false, false, true, true>,
+                        0b110_10100 => arm_op_ldstc::<C, true, false, true, false, false>,
+                        0b110_10101 => arm_op_ldstc::<C, true, false, true, false, true>,
+                        0b110_10110 => arm_op_ldstc::<C, true, false, true, true, false>,
+                        0b110_10111 => arm_op_ldstc::<C, true, false, true, true, true>,
+                        0b110_11000 => arm_op_ldstc::<C, true, true, false, false, false>,
+                        0b110_11001 => arm_op_ldstc::<C, true, true, false, false, true>,
+                        0b110_11010 => arm_op_ldstc::<C, true, true, false, true, false>,
+                        0b110_11011 => arm_op_ldstc::<C, true, true, false, true, true>,
+                        0b110_11100 => arm_op_ldstc::<C, true, true, true, false, false>,
+                        0b110_11101 => arm_op_ldstc::<C, true, true, true, false, true>,
+                        0b110_11110 => arm_op_ldstc::<C, true, true, true, true, false>,
+                        0b110_11111 => arm_op_ldstc::<C, true, true, true, true, true>,
+                        _ => unreachable!(),
+                    };
+                    (op, arm_disasm_ldstc)
+                }
 
                 0b111 => {
                     if hi & 0xF0 == 0xF0 {
-                        arm_op_swi
+                        (arm_op_swi, arm_disasm_swi)
                     } else {
                         if lo & 1 == 0 {
-                            arm_op_cdp
+                            (arm_op_cdp, arm_disasm_cdp)
                         } else {
                             if hi & 1 == 0 {
-                                arm_op_mrc
+                                (arm_op_mrc, arm_disasm_mrc_mcr)
                             } else {
-                                arm_op_mcr
+                                (arm_op_mcr, arm_disasm_mrc_mcr)
                             }
                         }
                     }
                 }
                 _ => unreachable!(),
-            }
+            };
+
+            op_tbl[(hi << 4) | lo] = op;
+            disasm_tbl[(hi << 4) | lo] = disasm;
         }
     }
 
-    tbl
+    (op_tbl, disasm_tbl)
 }
 
 fn arm_op_bx<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
@@ -1456,417 +1479,413 @@ fn arm_op_invalid<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
     panic!()
 }
 
-fn disasm(instr: u32, pc: u32) -> String {
+impl<C: Context> Cpu<C> {
+    fn disasm(&self, instr: u32, pc: u32) -> String {
+        let ix = (instr >> 16) & 0xFF0 | (instr >> 4) & 0xF;
+        self.arm_disasm_table[ix as usize](instr, pc)
+    }
+}
+
+#[rustfmt::skip]
+const COND: [&str; 15] = [
+    "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
+    "hi", "ls", "ge", "lt", "gt", "le", "",
+];
+
+fn disasm_cond(instr: u32) -> &'static str {
+    COND[(instr >> 28) as usize]
+}
+
+fn disasm_op2(instr: u32) -> Option<String> {
+    let i = (instr >> 25) & 1;
+
+    if i != 0 {
+        let imm = instr & 0xFF;
+        let rot = (instr >> 8) & 0xF;
+        let opr = imm.rotate_right(rot * 2);
+        return if opr < 10 {
+            Some(format!("#{opr}"))
+        } else {
+            Some(format!("#0x{opr:X}"))
+        };
+    }
+
+    let rm = instr & 0xF;
+    let shift_by_reg = (instr >> 4) & 1 != 0;
+    let ty = (instr >> 5) & 3;
+
+    const SHIFT_TYPE: [&str; 4] = ["lsl", "lsr", "asr", "ror"];
+    let ty = SHIFT_TYPE[ty as usize];
+
+    if shift_by_reg {
+        if (instr >> 7) & 1 != 0 {
+            return None;
+        }
+        let rs = (instr >> 8) & 0xF;
+        return Some(format!("r{rm}, {ty} R{rs}"));
+    }
+
+    let amo = (instr >> 7) & 0x1F;
+    if amo == 0 {
+        Some(format!("r{rm}"))
+    } else {
+        Some(format!("r{rm}, {ty} #{amo}"))
+    }
+}
+
+fn arm_disasm_bx(instr: u32, _pc: u32) -> String {
+    // cccc 0001 0010 1111 1111 1111 0001 nnnn
+    assert_eq!(instr & 0x0FFFFFF0, 0x012FFF10);
+    let cond = disasm_cond(instr);
+    let rn = instr & 0xF;
+    format!("bx{cond} r{rn}")
+}
+
+fn arm_disasm_b(instr: u32, pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let ofs = ((((instr & 0xFFFFFF) << 8) as i32 >> 8) << 2) as u32;
+    let dest = pc.wrapping_add(8).wrapping_add(ofs);
+    let l = if (instr & 0x01000000) != 0 { "l" } else { "" };
+    format!("b{l}{cond} 0x{dest:08X}")
+}
+
+fn arm_disasm_alu(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let opc = (instr >> 21) & 0xF;
+    let s = (instr >> 20) & 1;
+
     #[rustfmt::skip]
-    const COND: [&str; 15] = [
-        "EQ", "NE", "CS", "CC", "MI", "PL", "VS", "VC",
-        "HI", "LS", "GE", "LT", "GT", "LE", "",
+    const MNE: [&str; 16] = [
+        "and", "eor", "sub", "rsb", "add", "adc", "sbc", "rsc",
+        "tst", "teq", "cmp", "cmn", "orr", "mov", "bic", "mvn",
     ];
 
-    let cond = instr >> 28;
-    if cond == 15 {
-        return "Invalid".to_string();
+    let mne = MNE[opc as usize];
+    let s = if s != 0 { "s" } else { "" };
+    let op2 = disasm_op2(instr).unwrap();
+    let rn = (instr >> 16) & 0xF;
+    let rd = (instr >> 12) & 0xF;
+
+    match mne {
+        "mov" | "mvn" => format!("{mne}{cond}{s} r{rd}, {op2}"),
+        "cmp" | "cmn" | "teq" | "tst" => format!("{mne} r{rn}, {op2}"),
+        _ => format!("{mne}{cond}{s} r{rd}, r{rn}, {op2}"),
     }
-    let cond = COND[cond as usize];
+}
 
-    let op2 = || -> Option<String> {
-        let i = (instr >> 25) & 1;
+fn arm_disasm_mrs(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let p = (instr >> 22) & 1;
+    let psr = if p == 0 { "cpsr" } else { "spsr" };
+    let rd = (instr >> 12) & 0xF;
 
-        if i != 0 {
-            let imm = instr & 0xFF;
-            let rot = (instr >> 8) & 0xF;
-            let opr = imm.rotate_right(rot * 2);
-            return if opr < 10 {
-                Some(format!("#{opr}"))
+    if instr & 0x0FBF0FFF == 0x010F0000 {
+        // cccc 0001 0p00 1111 dddd 0000 0000 0000
+        format!("mrs{cond} r{rd}, {psr}")
+    } else {
+        panic!()
+    }
+}
+
+fn arm_disasm_msr(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let p = (instr >> 22) & 1;
+    let psr = if p == 0 { "cpsr" } else { "spsr" };
+    let rm = instr & 0xF;
+    if instr & 0x0FBFFFF0 == 0x0129F000 {
+        // cccc 0001 0p10 1001 1111 0000 0000 mmmm
+        format!("msr{cond} {psr}, r{rm}")
+    } else if instr & 0x0FBFF000 == 0x0128F000 {
+        // cccc 0001 0p10 1000 1111 0000 0000 mmmm
+        format!("msr{cond} {psr}_flg, r{rm}")
+    } else if instr & 0x0FBFF000 == 0x0328F000 {
+        // cccc 0011 0p10 1000 1111 rrrr iiii iiii
+        let rot = (instr >> 8) & 0xF;
+        let imm = (instr & 0xFF).rotate_right(rot * 2);
+        format!("msr{cond} {psr}_flg, #0x{imm:x}")
+    } else {
+        panic!()
+    }
+}
+
+fn arm_disasm_mul(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let rd = (instr >> 16) & 0xF;
+    let rn = (instr >> 12) & 0xF;
+    let rs = (instr >> 8) & 0xF;
+    let rm = instr & 0xF;
+    let a = (instr >> 25) & 1;
+    let s = (instr >> 24) & 1;
+    let s = if s == 0 { "" } else { "s" };
+
+    if a == 0 {
+        format!("mul{cond}{s} r{rd}, r{rm}, r{rs}")
+    } else {
+        format!("mla{cond}{s} r{rd}, r{rm}, r{rs}, r{rn}")
+    }
+}
+
+fn arm_disasm_mull(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let rdhi = (instr >> 16) & 0xF;
+    let rdlo = (instr >> 12) & 0xF;
+    let rs = (instr >> 8) & 0xF;
+    let rm = instr & 0xF;
+    let u = (instr >> 26) & 1;
+    let u = if u == 0 { "s" } else { "u" };
+    let a = (instr >> 25) & 1;
+    let s = (instr >> 24) & 1;
+    let s = if s == 0 { "" } else { "s" };
+
+    assert_ne!(rdhi, rdlo);
+    assert_ne!(rdhi, rm);
+    assert_ne!(rdlo, rm);
+    assert_ne!(rdhi, 15);
+    assert_ne!(rdlo, 15);
+
+    let mne = if a == 0 { "mul" } else { "mla" };
+    format!("{u}{mne}{cond}l{s} r{rdlo}, r{rdhi}, r{rm}, r{rs}")
+}
+
+fn arm_disasm_ldst(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+
+    let i = (instr >> 25) & 1;
+    let pre = (instr >> 24) & 1;
+    let up = (instr >> 23) & 1;
+    let b = (instr >> 22) & 1;
+    let wb = (instr >> 21) & 1;
+    let ld = (instr >> 20) & 1;
+    let rn = (instr >> 16) & 0xF;
+    let rd = (instr >> 12) & 0xF;
+
+    let b = if b == 0 { "" } else { "b" };
+    let t = if pre == 0 && wb == 1 { "t" } else { "" };
+
+    let mne = if ld == 0 { "str" } else { "ldr" };
+
+    let sign = if up == 0 { "-" } else { "" };
+
+    let addr = {
+        let w = if wb == 0 { "" } else { "!" };
+        if i == 0 {
+            let ofs = instr & 0xFFF;
+            if ofs == 0 {
+                assert_eq!(w, "");
+                assert_eq!(pre, 1);
+                format!("[r{rn}]")
             } else {
-                Some(format!("#0x{opr:X}"))
-            };
-        }
-
-        let rm = instr & 0xF;
-        let shift_by_reg = (instr >> 4) & 1 != 0;
-        let ty = (instr >> 5) & 3;
-
-        const SHIFT_TYPE: [&str; 4] = ["LSL", "LSR", "ASR", "ROR"];
-        let ty = SHIFT_TYPE[ty as usize];
-
-        if shift_by_reg {
-            if (instr >> 7) & 1 != 0 {
-                return None;
+                if pre == 0 {
+                    format!("[r{rn}, #{sign}{ofs}]{w}")
+                } else {
+                    format!("[r{rn}], #{sign}{ofs}")
+                }
             }
-            let rs = (instr >> 8) & 0xF;
-            return Some(format!("R{rm}, {ty} R{rs}"));
-        }
-
-        let amo = (instr >> 7) & 0x1F;
-        if amo == 0 {
-            Some(format!("R{rm}"))
         } else {
-            Some(format!("R{rm}, {ty} #{amo}"))
-        }
-    };
-
-    let ret = || {
-        if instr & 0x0C000000 == 0x00000000 {
-            // cccc 00io ooos nnnn dddd opr2 opr2 opr2
-
-            // let i = (instr >> 25) & 1;
-            let opc = (instr >> 21) & 0xF;
-            let s = (instr >> 20) & 1;
-
-            let op2 = op2();
-
-            if !(opc & 0xC0 == 0x80 && s == 0) && op2.is_some() {
-                #[rustfmt::skip]
-                const MNE: [&str; 16] = [
-                    "AND", "EOR", "SUB", "RSB", "ADD", "ADC", "SBC", "RSC",
-                    "TST", "TEQ", "CMP", "CMN", "ORR", "MOV", "BIC", "MVN",
-                ];
-
-                let mne = MNE[opc as usize];
-                let s = if s != 0 { "S" } else { "" };
-                let op2 = op2.unwrap();
-                let rn = (instr >> 16) & 0xF;
-                let rd = (instr >> 12) & 0xF;
-
-                return match mne {
-                    "MOV" | "MVN" => format!("{mne}{cond}{s} R{rd}, {op2}"),
-                    "CMP" | "CMN" | "TEQ" | "TST" => format!("{mne} R{rn}, {op2}"),
-                    _ => format!("{mne}{cond}{s} R{rd}, R{rn}, {op2}"),
-                };
-            }
-
-            // compare operations without setting flags
-            // are mapped to BX or PSR instructions
-
-            // cccc ..i. .oo. nnnn dddd opr2 opr2 opr2
-
-            if instr & 0x0FFFFFF0 == 0x012FFF10 {
-                // cccc 0001 0010 1111 1111 1111 0001 nnnn
-                let rn = instr & 0xF;
-                return format!("BX{cond} R{rn}");
-            }
-
-            let p = (instr >> 22) & 1;
-            let psr = if p == 0 { "CPSR" } else { "SPSR" };
-
-            if instr & 0x0FBF0FFF == 0x010F0000 {
-                // cccc 0001 0p00 1111 dddd 0000 0000 0000
-                let rd = (instr >> 12) & 0xF;
-                return format!("MRS{cond} R{rd}, {psr}");
-            }
-
-            if instr & 0x0FBFFFF0 == 0x0129F000 {
-                // cccc 0001 0p10 1001 1111 0000 0000 mmmm
-                let rm = instr & 0xF;
-                return format!("MSR{cond} {psr}, R{rm}");
-            }
-
-            if instr & 0x0FBFF000 == 0x0128F000 {
-                // cccc 0001 0p10 1000 1111 0000 0000 mmmm
-                let rm = instr & 0xF;
-                return format!("MSR{cond} {psr}_flg, R{rm}");
-            }
-
-            if instr & 0x0FBFF000 == 0x0328F000 {
-                // cccc 0011 0p10 1000 1111 rrrr iiii iiii
-                let rot = (instr >> 8) & 0xF;
-                let imm = (instr & 0xFF).rotate_right(rot * 2);
-                return format!("MSR{cond} {psr}_flg, #0x{imm:x}");
-            }
-
-            if instr & 0x0FC000F0 == 0x00000090 {
-                // cccc 0000 00AS dddd nnnn ssss 1001 mmmm
-                let rd = (instr >> 16) & 0xF;
-                let rn = (instr >> 12) & 0xF;
-                let rs = (instr >> 8) & 0xF;
-                let rm = instr & 0xF;
-                let a = (instr >> 25) & 1;
-                let s = (instr >> 24) & 1;
-                let s = if s == 0 { "" } else { "S" };
-
-                return if a == 0 {
-                    format!("MUL{cond}{s} R{rd}, R{rm}, R{rs}")
-                } else {
-                    format!("MLA{cond}{s} R{rd}, R{rm}, R{rs}, R{rn}")
-                };
-            }
-
-            if instr & 0x0FC000F0 == 0x00000090 {
-                // cccc 0000 1UAS hhhh llll ssss 1001 mmmm
-                let rdhi = (instr >> 16) & 0xF;
-                let rdlo = (instr >> 12) & 0xF;
-                let rs = (instr >> 8) & 0xF;
-                let rm = instr & 0xF;
-                let u = (instr >> 26) & 1;
-                let u = if u == 0 { "S" } else { "U" };
-                let a = (instr >> 25) & 1;
-                let s = (instr >> 24) & 1;
-                let s = if s == 0 { "" } else { "S" };
-
-                assert_ne!(rdhi, rdlo);
-                assert_ne!(rdhi, rm);
-                assert_ne!(rdlo, rm);
-                assert_ne!(rdhi, 15);
-                assert_ne!(rdlo, 15);
-
-                return if a == 0 {
-                    format!("{u}MUL{cond}L{s} R{rdlo}, R{rdhi}, R{rm}, R{rs}")
-                } else {
-                    format!("{u}MLA{cond}L{s} R{rdlo}, R{rdhi}, R{rm}, R{rs}")
-                };
-            }
-        }
-
-        if instr & 0x0C000000 == 0x04000000 {
-            let i = (instr >> 25) & 1;
-            let pre = (instr >> 24) & 1;
-            let up = (instr >> 23) & 1;
-            let b = (instr >> 22) & 1;
-            let wb = (instr >> 21) & 1;
-            let ld = (instr >> 20) & 1;
-            let rn = (instr >> 16) & 0xF;
-            let rd = (instr >> 12) & 0xF;
-
-            let b = if b == 0 { "" } else { "B" };
-            let t = if pre == 0 && wb == 1 { "T" } else { "" };
-
-            let mne = if ld == 0 { "STR" } else { "LDR" };
-
-            let sign = if up == 0 { "-" } else { "+" };
-
-            let addr = {
-                let w = if wb == 0 { "" } else { "!" };
-                if i == 0 {
-                    let ofs = instr & 0xFFF;
-                    if ofs == 0 {
-                        assert_eq!(w, "");
-                        assert_eq!(pre, 1);
-                        format!("[R{rn}]")
-                    } else {
-                        if pre == 0 {
-                            format!("[R{rn}, #{sign}{ofs}]{w}")
-                        } else {
-                            format!("[R{rn}], #{sign}{ofs}")
-                        }
-                    }
-                } else {
-                    let rm = instr & 0xF;
-                    let shift_by_reg = (instr >> 4) & 1 != 0;
-
-                    assert!(!shift_by_reg);
-
-                    let ty = (instr >> 5) & 3;
-
-                    const SHIFT_TYPE: [&str; 4] = ["LSL", "LSR", "ASR", "ROR"];
-                    let ty = SHIFT_TYPE[ty as usize];
-
-                    let amo = (instr >> 7) & 0x1F;
-                    if amo == 0 {
-                        if pre == 0 {
-                            format!("[R{rn}, #{sign}R{rm}]{w}")
-                        } else {
-                            format!("[R{rn}], #{sign}R{rm}")
-                        }
-                    } else {
-                        if pre == 0 {
-                            format!("[R{rn}, #{sign}R{rm}, {ty} #{amo}]{w}")
-                        } else {
-                            format!("[R{rn}], #{sign}R{rm}, {ty} #{amo}")
-                        }
-                    }
-                }
-            };
-
-            return format!("{mne}{cond}{b}{t} R{rd}, {addr}");
-        }
-
-        if instr & 0x0E400F90 == 0x00000090 || instr & 0x0E400090 == 0x00400090 {
-            // cccc 000P U0WL nnnn dddd 0000 1SH1 mmmm
-            // cccc 000P U1WL nnnn dddd oooo 1SH1 oooo
-
-            let sh = (instr >> 5) & 3;
-            if sh != 0 {
-                let pre = (instr >> 24) & 1;
-                let up = (instr >> 23) & 1;
-                let i = (instr >> 22) & 1;
-                let wb = (instr >> 21) & 1;
-                let ld = (instr >> 20) & 1;
-
-                let rn = (instr >> 16) & 0xF;
-                let rd = (instr >> 12) & 0xF;
-
-                let ty = match sh {
-                    1 => "H",
-                    2 => "SB",
-                    3 => "SH",
-                    _ => unreachable!(),
-                };
-
-                let mne = if ld == 0 { "STR" } else { "LDR" };
-                let w = if wb == 0 { "" } else { "!" };
-                let sign = if up == 0 { "-" } else { "+" };
-
-                let addr = if i == 0 {
-                    let rm = instr & 0xF;
-                    if pre == 1 {
-                        format!("[R{rn}, {sign}R{rm}]{w}")
-                    } else {
-                        format!("[R{rn}], {sign}R{rm}")
-                    }
-                } else {
-                    let ofs = (instr & 0xF) | ((instr >> 8) & 0xF << 4);
-
-                    if pre == 1 {
-                        if ofs == 0 {
-                            assert!(w == "");
-                            format!("[R{rn}]")
-                        } else {
-                            format!("[R{rn}, {sign}#0x{ofs}]{w}")
-                        }
-                    } else {
-                        format!("[R{rn}], {sign}#0x{ofs}")
-                    }
-                };
-
-                return format!("{mne}{cond}{ty} R{rd}, {addr}");
-            }
-        }
-
-        if instr & 0x0E000000 == 0x08000000 {
-            // cccc 100P USWL nnnn regi ster list ....
-            let pre = (instr >> 24) & 1;
-            let up = (instr >> 23) & 1;
-            let s = (instr >> 22) & 1;
-            let wb = (instr >> 21) & 1;
-            let ld = (instr >> 20) & 1;
-            let rn = (instr >> 16) & 0xF;
-
-            let mne = if ld == 0 { "STM" } else { "LDM" };
-
-            let suf = match (ld, pre, up) {
-                (1, 1, 1) => "ED",
-                (1, 0, 1) => "FD",
-                (1, 1, 0) => "EA",
-                (1, 0, 0) => "FA",
-                (0, 1, 1) => "FA",
-                (0, 0, 1) => "EA",
-                (0, 1, 0) => "FD",
-                (0, 0, 0) => "ED",
-                _ => unreachable!(),
-            };
-
-            let wb = if wb == 0 { "" } else { "!" };
-
-            let rlist = fmt_reglist(instr as u16);
-            let cpsr = if s == 0 { "" } else { "^" };
-
-            return format!("{mne}{cond}{suf} R{rn}{wb}, {rlist}{cpsr}");
-        }
-
-        if instr & 0x0FB00FF0 == 0x01000090 {
-            // cccc 0001 0B00 nnnn dddd 0000 1001 mmmm
-            let b = (instr >> 22) & 1;
-            let rn = (instr >> 16) & 0xF;
-            let rd = (instr >> 12) & 0xF;
             let rm = instr & 0xF;
+            let shift_by_reg = (instr >> 4) & 1 != 0;
 
-            let b = if b == 0 { "" } else { "B" };
+            assert!(!shift_by_reg);
 
-            return format!("SWP{cond}{b} R{rd}, R{rm}, [R{rn}]");
-        }
+            let ty = (instr >> 5) & 3;
 
-        if instr & 0x0E000000 == 0x0A000000 {
-            // cccc 101l oooo oooo oooo oooo oooo oooo
-            let ofs = ((((instr & 0xFFFFFF) << 8) as i32 >> 8) << 2) as u32;
-            let dest = pc.wrapping_add(8).wrapping_add(ofs);
-            let l = if (instr & 0x01000000) != 0 { "L" } else { "" };
-            return format!("B{l}{cond} 0x{dest:08X}");
-        }
+            const SHIFT_TYPE: [&str; 4] = ["lsl", "lsr", "asr", "ror"];
+            let ty = SHIFT_TYPE[ty as usize];
 
-        if instr & 0x0F000000 == 0x0F000000 {
-            // cccc 1111 .... .... .... .... .... ....
-            let comment = instr & 0xFFFFFF;
-            return format!("SWI{cond} #0x{comment:06X}");
-        }
-
-        if instr & 0x0F000010 == 0x0E000000 {
-            // cccc 1110 oooo nnnn dddd #### iii0 mmmm
-            let cp_opc = (instr >> 20) & 0xF;
-            let crn = (instr >> 16) & 0xF;
-            let crd = (instr >> 12) & 0xF;
-            let cp_num = (instr >> 8) & 0xF;
-            let cp = (instr >> 5) & 0x7;
-            let crm = instr & 0xF;
-
-            let expr2 = if cp == 0 {
-                "".to_string()
-            } else {
-                format!(", {cp}")
-            };
-
-            return format!("CDP{cond} p{cp_num}, {cp_opc}, c{crd}, c{crn}, c{crm}{expr2}");
-        }
-
-        if instr & 0x0F000010 == 0x0E000010 {
-            // cccc 1110 oooL nnnn dddd #### iii1 mmmm
-            let cp_opc = (instr >> 21) & 0x7;
-            let ld = (instr >> 20) & 1;
-            let crn = (instr >> 16) & 0xF;
-            let rd = (instr >> 12) & 0xF;
-            let cp_num = (instr >> 8) & 0xF;
-            let cp = (instr >> 5) & 0x7;
-            let crm = instr & 0xF;
-
-            let mne = if ld == 0 { "MCR" } else { "MRC" };
-
-            let expr2 = if cp == 0 {
-                "".to_string()
-            } else {
-                format!(", {cp}")
-            };
-
-            return format!("{mne}{cond} p{cp_num}, {cp_opc}, R{rd}, c{crn}, c{crm}{expr2}");
-        }
-
-        if instr & 0x0E000000 == 0x0C000000 {
-            // cccc 110P UNWL nnnn dddd #### oooo oooo
-            let pre = (instr >> 24) & 1;
-            let up = (instr >> 23) & 1;
-            let len = (instr >> 22) & 1;
-            let wb = (instr >> 21) & 1;
-            let ld = (instr >> 20) & 1;
-            let rn = (instr >> 16) & 0xF;
-            let crd = (instr >> 12) & 0xF;
-            let cp_num = (instr >> 8) & 0xF;
-            let offset = instr & 0xFF;
-
-            let mne = if ld == 0 { "STC" } else { "LDC" };
-            let l = if len == 0 { "" } else { "L" };
-            let sign = if up == 0 { "-" } else { "+" };
-            let wb = if wb == 0 { "" } else { "!" };
-
-            let addr = if pre == 1 {
-                if offset == 0 {
-                    format!("[R{rn}]")
+            let amo = (instr >> 7) & 0x1F;
+            if amo == 0 {
+                if pre == 0 {
+                    format!("[r{rn}, #{sign}r{rm}]{w}")
                 } else {
-                    format!("[R{rn}, {sign}#0x{offset:02X}]{wb}")
+                    format!("[r{rn}], #{sign}r{rm}")
                 }
             } else {
-                format!("[R{rn}], {sign}#0x{offset:02X}")
-            };
-
-            return format!("{mne}{cond}{l} p{cp_num}, c{crd}, {addr}");
+                if pre == 0 {
+                    format!("[r{rn}, #{sign}r{rm}, {ty} #{amo}]{w}")
+                } else {
+                    format!("[r{rn}], #{sign}r{rm}, {ty} #{amo}")
+                }
+            }
         }
-
-        if instr & 0x0E000010 == 0x06000010 {
-            return format!("UNDEF");
-        }
-
-        panic!("Invalid instruction: 0x{:08X}", instr);
     };
 
-    ret()
+    format!("{mne}{cond}{b}{t} r{rd}, {addr}")
+}
+
+fn arm_disasm_ldsth(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+
+    let pre = (instr >> 24) & 1;
+    let up = (instr >> 23) & 1;
+    let i = (instr >> 22) & 1;
+    let wb = (instr >> 21) & 1;
+    let ld = (instr >> 20) & 1;
+
+    let rn = (instr >> 16) & 0xF;
+    let rd = (instr >> 12) & 0xF;
+
+    let sh = (instr >> 5) & 3;
+
+    let ty = match sh {
+        1 => "h",
+        2 => "sb",
+        3 => "sh",
+        _ => unreachable!(),
+    };
+
+    let mne = if ld == 0 { "str" } else { "ldr" };
+    let w = if wb == 0 { "" } else { "!" };
+    let sign = if up == 0 { "-" } else { "+" };
+
+    let addr = if i == 0 {
+        let rm = instr & 0xF;
+        if pre == 1 {
+            format!("[r{rn}, {sign}r{rm}]{w}")
+        } else {
+            format!("[r{rn}], {sign}r{rm}")
+        }
+    } else {
+        let ofs = (instr & 0xF) | ((instr >> 8) & 0xF << 4);
+
+        if pre == 1 {
+            if ofs == 0 {
+                assert!(w == "");
+                format!("[r{rn}]")
+            } else {
+                format!("[r{rn}, {sign}#0x{ofs}]{w}")
+            }
+        } else {
+            format!("[r{rn}], {sign}#0x{ofs}")
+        }
+    };
+
+    format!("{mne}{cond}{ty} r{rd}, {addr}")
+}
+
+fn arm_disasm_ldstm(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+
+    let pre = (instr >> 24) & 1;
+    let up = (instr >> 23) & 1;
+    let s = (instr >> 22) & 1;
+    let wb = (instr >> 21) & 1;
+    let ld = (instr >> 20) & 1;
+    let rn = (instr >> 16) & 0xF;
+
+    let mne = if ld == 0 { "stm" } else { "ldm" };
+
+    let suf = match (ld, pre, up) {
+        (1, 1, 1) => "ed",
+        (1, 0, 1) => "fd",
+        (1, 1, 0) => "ea",
+        (1, 0, 0) => "fa",
+        (0, 1, 1) => "fa",
+        (0, 0, 1) => "ea",
+        (0, 1, 0) => "fd",
+        (0, 0, 0) => "ed",
+        _ => unreachable!(),
+    };
+
+    let wb = if wb == 0 { "" } else { "!" };
+
+    let rlist = fmt_reglist(instr as u16);
+    let cpsr = if s == 0 { "" } else { "^" };
+
+    format!("{mne}{cond}{suf} r{rn}{wb}, {rlist}{cpsr}")
+}
+
+fn arm_disasm_swp(instr: u32, _pc: u32) -> String {
+    // cccc 0001 0B00 nnnn dddd 0000 1001 mmmm
+    assert_eq!(instr & 0x0FB00FF0, 0x01000090);
+    let cond = disasm_cond(instr);
+    let b = (instr >> 22) & 1;
+    let rn = (instr >> 16) & 0xF;
+    let rd = (instr >> 12) & 0xF;
+    let rm = instr & 0xF;
+
+    let b = if b == 0 { "" } else { "b" };
+    format!("swp{cond}{b} r{rd}, r{rm}, [r{rn}]")
+}
+
+fn arm_disasm_swi(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let comment = instr & 0xFFFFFF;
+    format!("swi{cond} #0x{comment:06X}")
+}
+
+fn arm_disasm_cdp(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let cp_opc = (instr >> 20) & 0xF;
+    let crn = (instr >> 16) & 0xF;
+    let crd = (instr >> 12) & 0xF;
+    let cp_num = (instr >> 8) & 0xF;
+    let cp = (instr >> 5) & 0x7;
+    let crm = instr & 0xF;
+
+    let expr2 = if cp == 0 {
+        "".to_string()
+    } else {
+        format!(", {cp}")
+    };
+    format!("cdp{cond} p{cp_num}, {cp_opc}, c{crd}, c{crn}, c{crm}{expr2}")
+}
+
+fn arm_disasm_ldstc(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let pre = (instr >> 24) & 1;
+    let up = (instr >> 23) & 1;
+    let len = (instr >> 22) & 1;
+    let wb = (instr >> 21) & 1;
+    let ld = (instr >> 20) & 1;
+    let rn = (instr >> 16) & 0xF;
+    let crd = (instr >> 12) & 0xF;
+    let cp_num = (instr >> 8) & 0xF;
+    let offset = instr & 0xFF;
+
+    let mne = if ld == 0 { "stc" } else { "ldc" };
+    let l = if len == 0 { "" } else { "l" };
+    let sign = if up == 0 { "-" } else { "+" };
+    let wb = if wb == 0 { "" } else { "!" };
+
+    let addr = if pre == 1 {
+        if offset == 0 {
+            format!("[r{rn}]")
+        } else {
+            format!("[r{rn}, {sign}#0x{offset:02X}]{wb}")
+        }
+    } else {
+        format!("[r{rn}], {sign}#0x{offset:02X}")
+    };
+
+    return format!("{mne}{cond}{l} p{cp_num}, c{crd}, {addr}");
+}
+
+fn arm_disasm_mrc_mcr(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let cp_opc = (instr >> 21) & 0x7;
+    let ld = (instr >> 20) & 1;
+    let crn = (instr >> 16) & 0xF;
+    let rd = (instr >> 12) & 0xF;
+    let cp_num = (instr >> 8) & 0xF;
+    let cp = (instr >> 5) & 0x7;
+    let crm = instr & 0xF;
+
+    let mne = if ld == 0 { "mcr" } else { "mrc" };
+
+    let expr2 = if cp == 0 {
+        "".to_string()
+    } else {
+        format!(", {cp}")
+    };
+    return format!("{mne}{cond} p{cp_num}, {cp_opc}, r{rd}, c{crn}, c{crm}{expr2}");
+}
+
+fn arm_disasm_undef(_instr: u32, _pc: u32) -> String {
+    "undef".to_string()
+}
+
+fn arm_disasm_invalid(_instr: u32, _pc: u32) -> String {
+    "invalid".to_string()
 }
 
 fn fmt_reglist(reglist: u16) -> String {
@@ -1889,11 +1908,11 @@ fn fmt_reglist(reglist: u16) -> String {
         }
 
         if i == j {
-            write!(&mut ret, "R{i}").unwrap();
+            write!(&mut ret, "r{i}").unwrap();
         } else if j - i == 1 {
-            write!(&mut ret, "R{i}, R{j}").unwrap();
+            write!(&mut ret, "r{i}, r{j}").unwrap();
         } else {
-            write!(&mut ret, "R{i}-R{j}").unwrap();
+            write!(&mut ret, "r{i}-r{j}").unwrap();
         }
     }
 
