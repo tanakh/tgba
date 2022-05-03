@@ -271,7 +271,16 @@ impl<C: Context> Cpu<C> {
         if log::log_enabled!(log::Level::Trace) {
             let pc = self.regs.r[15].wrapping_sub(4);
             let s = disasm(instr, pc);
-            trace!("{pc:08X}: {instr:08X}: {s}");
+            trace!(
+                "{pc:08X}: {instr:08X}: {s:24} CPSR:{n}{z}{c}{v}{i}{f}{t}",
+                n = if self.regs.n_flag { 'N' } else { 'n' },
+                z = if self.regs.z_flag { 'Z' } else { 'z' },
+                c = if self.regs.c_flag { 'C' } else { 'c' },
+                v = if self.regs.v_flag { 'V' } else { 'v' },
+                i = if self.regs.irq_disable { 'I' } else { 'i' },
+                f = if self.regs.fiq_disable { 'F' } else { 'f' },
+                t = if self.regs.state { 'T' } else { 't' },
+            );
         }
 
         if self.regs.check_cond((instr >> 28) as u8) {
@@ -1215,18 +1224,18 @@ fn arm_op_ldst<
 
     if L {
         if B {
-            cpu.regs.r[rd] = u32::load(ctx, addr);
-        } else {
             cpu.regs.r[rd] = u8::load(ctx, addr);
+        } else {
+            cpu.regs.r[rd] = u32::load(ctx, addr);
         };
     } else {
         // When R15 is the source register (Rd) of a register store (STR) instruction,
         // the stored value will be address of the instruction plus 12.
         let data = cpu.regs.r[rd].wrapping_add(if rd == 15 { 4 } else { 0 });
         if B {
-            u32::store(ctx, addr, data);
-        } else {
             u8::store(ctx, addr, data);
+        } else {
+            u32::store(ctx, addr, data);
         }
     }
 

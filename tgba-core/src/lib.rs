@@ -1,6 +1,9 @@
+// #![feature(trace_macros)]
+
 mod bus;
 mod context;
 mod cpu;
+mod io;
 mod rom;
 mod util;
 
