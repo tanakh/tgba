@@ -19,6 +19,8 @@ pub struct Cpu<C: Context> {
     regs: Registers,
     pc_changed: bool,
 
+    prev_regs: [u32; 16],
+
     arm_op_table: [ArmOp<C>; 0x1000],
     arm_disasm_table: [ArmDisasm; 0x1000],
 
@@ -71,6 +73,19 @@ const MODE_SUPERVISOR: u8 = 0b10011;
 const MODE_ABORT: u8 = 0b10111;
 const MODE_UNDEFINED: u8 = 0b11011;
 const MODE_SYSTEM: u8 = 0b11111;
+
+fn mode_name(mode: u8) -> &'static str {
+    match mode {
+        MODE_USER => "USR",
+        MODE_FIQ => "FIQ",
+        MODE_IRQ => "IRQ",
+        MODE_SUPERVISOR => "SVC",
+        MODE_ABORT => "ABT",
+        MODE_UNDEFINED => "UND",
+        MODE_SYSTEM => "SYS",
+        _ => "INV",
+    }
+}
 
 struct Registers {
     r: [u32; 16],
@@ -242,6 +257,7 @@ impl<C: Context> Cpu<C> {
         Cpu {
             regs: Registers::default(),
             pc_changed: false,
+            prev_regs: [0; 16],
             arm_op_table,
             arm_disasm_table,
             thumb_op_table,
@@ -287,16 +303,8 @@ impl<C: Context> Cpu<C> {
         if log::log_enabled!(log::Level::Trace) {
             let pc = self.regs.r[15].wrapping_sub(4);
             let s = self.disasm_arm(instr, pc);
-            trace!(
-                "{pc:08X}: {instr:08X}: {s:24} CPSR:{n}{z}{c}{v}{i}{f}{t}",
-                n = if self.regs.n_flag { 'N' } else { 'n' },
-                z = if self.regs.z_flag { 'Z' } else { 'z' },
-                c = if self.regs.c_flag { 'C' } else { 'c' },
-                v = if self.regs.v_flag { 'V' } else { 'v' },
-                i = if self.regs.irq_disable { 'I' } else { 'i' },
-                f = if self.regs.fiq_disable { 'F' } else { 'f' },
-                t = if self.regs.state { 'T' } else { 't' },
-            );
+            let regs = self.dump_regs();
+            trace!("{pc:08X}: {instr:08X}: {s:24} {regs}",);
         }
 
         if self.regs.check_cond((instr >> 28) as u8) {
@@ -318,16 +326,8 @@ impl<C: Context> Cpu<C> {
         if log::log_enabled!(log::Level::Trace) {
             let pc = self.regs.r[15].wrapping_sub(2);
             let s = self.disasm_thumb(instr, pc);
-            trace!(
-                "{pc:08X}:     {instr:04X}: {s:24} CPSR:{n}{z}{c}{v}{i}{f}{t}",
-                n = if self.regs.n_flag { 'N' } else { 'n' },
-                z = if self.regs.z_flag { 'Z' } else { 'z' },
-                c = if self.regs.c_flag { 'C' } else { 'c' },
-                v = if self.regs.v_flag { 'V' } else { 'v' },
-                i = if self.regs.irq_disable { 'I' } else { 'i' },
-                f = if self.regs.fiq_disable { 'F' } else { 'f' },
-                t = if self.regs.state { 'T' } else { 't' },
-            );
+            let regs = self.dump_regs();
+            trace!("{pc:08X}:     {instr:04X}: {s:24} {regs}",);
         }
 
         let ix = instr >> 6;
@@ -944,6 +944,16 @@ fn build_thumb_table<C: Context>() -> ([ThumbOp<C>; 0x400], [ThumbDisasm; 0x400]
     (op_tbl, disasm_tbl)
 }
 
+#[rustfmt::skip]
+const COND: [&str; 15] = [
+    "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
+    "hi", "ls", "ge", "lt", "gt", "le", "",
+];
+
+fn disasm_cond(instr: u32) -> &'static str {
+    COND[(instr >> 28) as usize]
+}
+
 fn arm_op_bx<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
     // TODO: 2S + 1N cycles
     assert_eq!(instr & 0x0ffffff0, 0x012fff10);
@@ -951,6 +961,14 @@ fn arm_op_bx<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
     let new_pc = cpu.regs.r[rn];
     cpu.regs.state = new_pc & 1 != 0;
     cpu.set_pc(new_pc & !1);
+}
+
+fn arm_disasm_bx(instr: u32, _pc: u32) -> String {
+    // cccc 0001 0010 1111 1111 1111 0001 nnnn
+    assert_eq!(instr & 0x0FFFFFF0, 0x012FFF10);
+    let cond = disasm_cond(instr);
+    let rn = instr & 0xF;
+    format!("bx{cond} r{rn}")
 }
 
 fn arm_op_b<C: Context, const L: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
@@ -961,6 +979,14 @@ fn arm_op_b<C: Context, const L: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u3
         cpu.regs.r[14] = old_pc.wrapping_sub(4);
     }
     cpu.set_pc(old_pc.wrapping_add(offset as u32));
+}
+
+fn arm_disasm_b(instr: u32, pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let ofs = ((((instr & 0xFFFFFF) << 8) as i32 >> 8) << 2) as u32;
+    let dest = pc.wrapping_add(8).wrapping_add(ofs);
+    let l = if (instr & 0x01000000) != 0 { "l" } else { "" };
+    format!("b{l}{cond} 0x{dest:08X}")
 }
 
 fn decode_reg_sft_imm(cpu: &mut Cpu<impl Context>, instr: u32) -> (u32, bool) {
@@ -1255,6 +1281,67 @@ fn arm_op_alu<C: Context, const I: bool, const S: bool, const O: u8>(
     }
 }
 
+fn disasm_op2(instr: u32) -> Option<String> {
+    let i = (instr >> 25) & 1;
+
+    if i != 0 {
+        let imm = instr & 0xFF;
+        let rot = (instr >> 8) & 0xF;
+        let opr = imm.rotate_right(rot * 2);
+        return if opr < 10 {
+            Some(format!("#{opr}"))
+        } else {
+            Some(format!("#0x{opr:X}"))
+        };
+    }
+
+    let rm = instr & 0xF;
+    let shift_by_reg = (instr >> 4) & 1 != 0;
+    let ty = (instr >> 5) & 3;
+
+    const SHIFT_TYPE: [&str; 4] = ["lsl", "lsr", "asr", "ror"];
+    let ty = SHIFT_TYPE[ty as usize];
+
+    if shift_by_reg {
+        if (instr >> 7) & 1 != 0 {
+            return None;
+        }
+        let rs = (instr >> 8) & 0xF;
+        return Some(format!("r{rm}, {ty} R{rs}"));
+    }
+
+    let amo = (instr >> 7) & 0x1F;
+    if amo == 0 {
+        Some(format!("r{rm}"))
+    } else {
+        Some(format!("r{rm}, {ty} #{amo}"))
+    }
+}
+
+fn arm_disasm_alu(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let opc = (instr >> 21) & 0xF;
+    let s = (instr >> 20) & 1;
+
+    #[rustfmt::skip]
+    const MNE: [&str; 16] = [
+        "and", "eor", "sub", "rsb", "add", "adc", "sbc", "rsc",
+        "tst", "teq", "cmp", "cmn", "orr", "mov", "bic", "mvn",
+    ];
+
+    let mne = MNE[opc as usize];
+    let s = if s != 0 { "s" } else { "" };
+    let op2 = disasm_op2(instr).unwrap();
+    let rn = (instr >> 16) & 0xF;
+    let rd = (instr >> 12) & 0xF;
+
+    match mne {
+        "mov" | "mvn" => format!("{mne}{cond}{s} r{rd}, {op2}"),
+        "cmp" | "cmn" | "teq" | "tst" => format!("{mne} r{rn}, {op2}"),
+        _ => format!("{mne}{cond}{s} r{rd}, r{rn}, {op2}"),
+    }
+}
+
 fn arm_op_mrs<C: Context, const S: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
     assert_eq!(instr & 0x0FBF0FFF, 0x010F0000);
     let rd = ((instr >> 12) & 0xF) as usize;
@@ -1263,6 +1350,20 @@ fn arm_op_mrs<C: Context, const S: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: 
         cpu.regs.r[rd] = cpu.regs.spsr;
     } else {
         cpu.regs.r[rd] = cpu.regs.cpsr();
+    }
+}
+
+fn arm_disasm_mrs(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let p = (instr >> 22) & 1;
+    let psr = if p == 0 { "cpsr" } else { "spsr" };
+    let rd = (instr >> 12) & 0xF;
+
+    if instr & 0x0FBF0FFF == 0x010F0000 {
+        // cccc 0001 0p00 1111 dddd 0000 0000 0000
+        format!("mrs{cond} r{rd}, {psr}")
+    } else {
+        panic!()
     }
 }
 
@@ -1278,19 +1379,40 @@ fn arm_op_msr<C: Context, const I: bool, const S: bool>(
         assert!(instr & 0x0FBEF000 == 0x0328F000);
     }
     let src = decode_op2::<C, I>(cpu, instr).0;
-    if !S {
+    if S {
         if flg == 0 {
-            cpu.regs.spsr = src;
-        } else {
             cpu.regs.spsr = cpu.regs.spsr & !0xF0000000 | src & 0xF0000000;
+        } else {
+            cpu.regs.spsr = src;
         }
     } else {
         if flg == 0 {
-            cpu.regs.set_cpsr(src);
-        } else {
             cpu.regs
                 .set_cpsr(cpu.regs.cpsr() & !0xF0000000 | src & 0xF0000000);
+        } else {
+            cpu.regs.set_cpsr(src);
         }
+    }
+}
+
+fn arm_disasm_msr(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let p = (instr >> 22) & 1;
+    let psr = if p == 0 { "cpsr" } else { "spsr" };
+    let rm = instr & 0xF;
+    if instr & 0x0FBFFFF0 == 0x0129F000 {
+        // cccc 0001 0p10 1001 1111 0000 0000 mmmm
+        format!("msr{cond} {psr}, r{rm}")
+    } else if instr & 0x0FBFF000 == 0x0128F000 {
+        // cccc 0001 0p10 1000 1111 0000 0000 mmmm
+        format!("msr{cond} {psr}_flg, r{rm}")
+    } else if instr & 0x0FBFF000 == 0x0328F000 {
+        // cccc 0011 0p10 1000 1111 rrrr iiii iiii
+        let rot = (instr >> 8) & 0xF;
+        let imm = (instr & 0xFF).rotate_right(rot * 2);
+        format!("msr{cond} {psr}_flg, #0x{imm:x}")
+    } else {
+        panic!()
     }
 }
 
@@ -1328,6 +1450,23 @@ fn arm_op_mul<C: Context, const A: bool, const S: bool>(
     cpu.regs.r[rd] = res;
     if !S {
         cpu.regs.set_nz(res);
+    }
+}
+
+fn arm_disasm_mul(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let rd = (instr >> 16) & 0xF;
+    let rn = (instr >> 12) & 0xF;
+    let rs = (instr >> 8) & 0xF;
+    let rm = instr & 0xF;
+    let a = (instr >> 25) & 1;
+    let s = (instr >> 24) & 1;
+    let s = if s == 0 { "" } else { "s" };
+
+    if a == 0 {
+        format!("mul{cond}{s} r{rd}, r{rm}, r{rs}")
+    } else {
+        format!("mla{cond}{s} r{rd}, r{rm}, r{rs}, r{rn}")
     }
 }
 
@@ -1381,6 +1520,28 @@ fn arm_op_mull<C: Context, const U: bool, const A: bool, const S: bool>(
         cpu.regs.n_flag = res & 0x80000000 != 0;
         cpu.regs.z_flag = res == 0;
     }
+}
+
+fn arm_disasm_mull(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let rdhi = (instr >> 16) & 0xF;
+    let rdlo = (instr >> 12) & 0xF;
+    let rs = (instr >> 8) & 0xF;
+    let rm = instr & 0xF;
+    let u = (instr >> 26) & 1;
+    let u = if u == 0 { "s" } else { "u" };
+    let a = (instr >> 25) & 1;
+    let s = (instr >> 24) & 1;
+    let s = if s == 0 { "" } else { "s" };
+
+    assert_ne!(rdhi, rdlo);
+    assert_ne!(rdhi, rm);
+    assert_ne!(rdlo, rm);
+    assert_ne!(rdhi, 15);
+    assert_ne!(rdlo, 15);
+
+    let mne = if a == 0 { "mul" } else { "mla" };
+    format!("{u}{mne}{cond}l{s} r{rdlo}, r{rdhi}, r{rm}, r{rs}")
 }
 
 trait Data {
@@ -1495,6 +1656,71 @@ fn arm_op_ldst<
     }
 }
 
+fn arm_disasm_ldst(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+
+    let i = (instr >> 25) & 1;
+    let pre = (instr >> 24) & 1;
+    let up = (instr >> 23) & 1;
+    let b = (instr >> 22) & 1;
+    let wb = (instr >> 21) & 1;
+    let ld = (instr >> 20) & 1;
+    let rn = (instr >> 16) & 0xF;
+    let rd = (instr >> 12) & 0xF;
+
+    let b = if b == 0 { "" } else { "b" };
+    let t = if pre == 0 && wb == 1 { "t" } else { "" };
+
+    let mne = if ld == 0 { "str" } else { "ldr" };
+
+    let sign = if up == 0 { "-" } else { "" };
+
+    let addr = {
+        let w = if wb == 0 { "" } else { "!" };
+        if i == 0 {
+            let ofs = instr & 0xFFF;
+            if ofs == 0 {
+                assert_eq!(w, "");
+                assert_eq!(pre, 1);
+                format!("[r{rn}]")
+            } else {
+                if pre == 0 {
+                    format!("[r{rn}, #{sign}{ofs}]{w}")
+                } else {
+                    format!("[r{rn}], #{sign}{ofs}")
+                }
+            }
+        } else {
+            let rm = instr & 0xF;
+            let shift_by_reg = (instr >> 4) & 1 != 0;
+
+            assert!(!shift_by_reg);
+
+            let ty = (instr >> 5) & 3;
+
+            const SHIFT_TYPE: [&str; 4] = ["lsl", "lsr", "asr", "ror"];
+            let ty = SHIFT_TYPE[ty as usize];
+
+            let amo = (instr >> 7) & 0x1F;
+            if amo == 0 {
+                if pre == 0 {
+                    format!("[r{rn}, #{sign}r{rm}]{w}")
+                } else {
+                    format!("[r{rn}], #{sign}r{rm}")
+                }
+            } else {
+                if pre == 0 {
+                    format!("[r{rn}, #{sign}r{rm}, {ty} #{amo}]{w}")
+                } else {
+                    format!("[r{rn}], #{sign}r{rm}, {ty} #{amo}")
+                }
+            }
+        }
+    };
+
+    format!("{mne}{cond}{b}{t} r{rd}, {addr}")
+}
+
 fn arm_op_ldsth<
     C: Context,
     T: Data,
@@ -1548,6 +1774,56 @@ fn arm_op_ldsth<
         assert_ne!(rn, 15);
         cpu.regs.r[rn] = ea;
     }
+}
+
+fn arm_disasm_ldsth(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+
+    let pre = (instr >> 24) & 1;
+    let up = (instr >> 23) & 1;
+    let i = (instr >> 22) & 1;
+    let wb = (instr >> 21) & 1;
+    let ld = (instr >> 20) & 1;
+
+    let rn = (instr >> 16) & 0xF;
+    let rd = (instr >> 12) & 0xF;
+
+    let sh = (instr >> 5) & 3;
+
+    let ty = match sh {
+        1 => "h",
+        2 => "sb",
+        3 => "sh",
+        _ => unreachable!(),
+    };
+
+    let mne = if ld == 0 { "str" } else { "ldr" };
+    let w = if wb == 0 { "" } else { "!" };
+    let sign = if up == 0 { "-" } else { "+" };
+
+    let addr = if i == 0 {
+        let rm = instr & 0xF;
+        if pre == 1 {
+            format!("[r{rn}, {sign}r{rm}]{w}")
+        } else {
+            format!("[r{rn}], {sign}r{rm}")
+        }
+    } else {
+        let ofs = (instr & 0xF) | ((instr >> 8) & 0xF << 4);
+
+        if pre == 1 {
+            if ofs == 0 {
+                assert!(w == "");
+                format!("[r{rn}]")
+            } else {
+                format!("[r{rn}, {sign}#0x{ofs}]{w}")
+            }
+        } else {
+            format!("[r{rn}], {sign}#0x{ofs}")
+        }
+    };
+
+    format!("{mne}{cond}{ty} r{rd}, {addr}")
 }
 
 fn arm_op_ldstm<
@@ -1639,365 +1915,6 @@ fn arm_op_ldstm<
     }
 }
 
-fn arm_op_swp<C: Context, const B: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u32) {
-    let rn = ((instr >> 16) & 0xF) as usize;
-    let rd = ((instr >> 12) & 0xF) as usize;
-    let rm = (instr & 0xF) as usize;
-
-    // Do not use R15 as an operand (Rd, Rn or Rs) in a SWP instruction.
-    assert!(rd != 15);
-    assert!(rn != 15);
-    assert!(rm != 15);
-
-    let addr = cpu.regs.r[rn];
-    let src = cpu.regs.r[rm];
-    let data = if !B {
-        u32::load(ctx, addr)
-    } else {
-        u8::load(ctx, addr)
-    };
-    if !B {
-        u32::store(ctx, addr, src);
-    } else {
-        u8::store(ctx, addr, src);
-    }
-    cpu.regs.r[rd] = data;
-}
-
-fn arm_op_swi<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
-    cpu.exception(Exception::SoftwareInterrupt)
-}
-
-fn arm_op_ldstc<
-    C: Context,
-    const P: bool,
-    const U: bool,
-    const N: bool,
-    const W: bool,
-    const L: bool,
->(
-    _cpu: &mut Cpu<C>,
-    _ctx: &mut C,
-    _instr: u32,
-) {
-    todo!()
-}
-
-fn arm_op_cdp<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
-    todo!()
-}
-
-fn arm_op_mrc<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
-    todo!()
-}
-
-fn arm_op_mcr<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
-    todo!()
-}
-
-fn arm_op_undef<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
-    trace!("Undefined instruction: {:08X}", instr);
-    panic!()
-}
-
-fn arm_op_invalid<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
-    trace!("Invalid instruction: {:08X}", instr);
-    panic!()
-}
-
-fn thumb_op_invalid<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
-    trace!("Invalid instruction: {:04X}", instr);
-    panic!()
-}
-
-impl<C: Context> Cpu<C> {
-    fn disasm_arm(&self, instr: u32, pc: u32) -> String {
-        let ix = (instr >> 16) & 0xFF0 | (instr >> 4) & 0xF;
-        self.arm_disasm_table[ix as usize](instr, pc)
-    }
-
-    fn disasm_thumb(&self, instr: u16, pc: u32) -> String {
-        let ix = instr >> 6;
-        self.thumb_disasm_table[ix as usize](instr, pc)
-    }
-}
-
-#[rustfmt::skip]
-const COND: [&str; 15] = [
-    "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
-    "hi", "ls", "ge", "lt", "gt", "le", "",
-];
-
-fn disasm_cond(instr: u32) -> &'static str {
-    COND[(instr >> 28) as usize]
-}
-
-fn disasm_op2(instr: u32) -> Option<String> {
-    let i = (instr >> 25) & 1;
-
-    if i != 0 {
-        let imm = instr & 0xFF;
-        let rot = (instr >> 8) & 0xF;
-        let opr = imm.rotate_right(rot * 2);
-        return if opr < 10 {
-            Some(format!("#{opr}"))
-        } else {
-            Some(format!("#0x{opr:X}"))
-        };
-    }
-
-    let rm = instr & 0xF;
-    let shift_by_reg = (instr >> 4) & 1 != 0;
-    let ty = (instr >> 5) & 3;
-
-    const SHIFT_TYPE: [&str; 4] = ["lsl", "lsr", "asr", "ror"];
-    let ty = SHIFT_TYPE[ty as usize];
-
-    if shift_by_reg {
-        if (instr >> 7) & 1 != 0 {
-            return None;
-        }
-        let rs = (instr >> 8) & 0xF;
-        return Some(format!("r{rm}, {ty} R{rs}"));
-    }
-
-    let amo = (instr >> 7) & 0x1F;
-    if amo == 0 {
-        Some(format!("r{rm}"))
-    } else {
-        Some(format!("r{rm}, {ty} #{amo}"))
-    }
-}
-
-fn arm_disasm_bx(instr: u32, _pc: u32) -> String {
-    // cccc 0001 0010 1111 1111 1111 0001 nnnn
-    assert_eq!(instr & 0x0FFFFFF0, 0x012FFF10);
-    let cond = disasm_cond(instr);
-    let rn = instr & 0xF;
-    format!("bx{cond} r{rn}")
-}
-
-fn arm_disasm_b(instr: u32, pc: u32) -> String {
-    let cond = disasm_cond(instr);
-    let ofs = ((((instr & 0xFFFFFF) << 8) as i32 >> 8) << 2) as u32;
-    let dest = pc.wrapping_add(8).wrapping_add(ofs);
-    let l = if (instr & 0x01000000) != 0 { "l" } else { "" };
-    format!("b{l}{cond} 0x{dest:08X}")
-}
-
-fn arm_disasm_alu(instr: u32, _pc: u32) -> String {
-    let cond = disasm_cond(instr);
-    let opc = (instr >> 21) & 0xF;
-    let s = (instr >> 20) & 1;
-
-    #[rustfmt::skip]
-    const MNE: [&str; 16] = [
-        "and", "eor", "sub", "rsb", "add", "adc", "sbc", "rsc",
-        "tst", "teq", "cmp", "cmn", "orr", "mov", "bic", "mvn",
-    ];
-
-    let mne = MNE[opc as usize];
-    let s = if s != 0 { "s" } else { "" };
-    let op2 = disasm_op2(instr).unwrap();
-    let rn = (instr >> 16) & 0xF;
-    let rd = (instr >> 12) & 0xF;
-
-    match mne {
-        "mov" | "mvn" => format!("{mne}{cond}{s} r{rd}, {op2}"),
-        "cmp" | "cmn" | "teq" | "tst" => format!("{mne} r{rn}, {op2}"),
-        _ => format!("{mne}{cond}{s} r{rd}, r{rn}, {op2}"),
-    }
-}
-
-fn arm_disasm_mrs(instr: u32, _pc: u32) -> String {
-    let cond = disasm_cond(instr);
-    let p = (instr >> 22) & 1;
-    let psr = if p == 0 { "cpsr" } else { "spsr" };
-    let rd = (instr >> 12) & 0xF;
-
-    if instr & 0x0FBF0FFF == 0x010F0000 {
-        // cccc 0001 0p00 1111 dddd 0000 0000 0000
-        format!("mrs{cond} r{rd}, {psr}")
-    } else {
-        panic!()
-    }
-}
-
-fn arm_disasm_msr(instr: u32, _pc: u32) -> String {
-    let cond = disasm_cond(instr);
-    let p = (instr >> 22) & 1;
-    let psr = if p == 0 { "cpsr" } else { "spsr" };
-    let rm = instr & 0xF;
-    if instr & 0x0FBFFFF0 == 0x0129F000 {
-        // cccc 0001 0p10 1001 1111 0000 0000 mmmm
-        format!("msr{cond} {psr}, r{rm}")
-    } else if instr & 0x0FBFF000 == 0x0128F000 {
-        // cccc 0001 0p10 1000 1111 0000 0000 mmmm
-        format!("msr{cond} {psr}_flg, r{rm}")
-    } else if instr & 0x0FBFF000 == 0x0328F000 {
-        // cccc 0011 0p10 1000 1111 rrrr iiii iiii
-        let rot = (instr >> 8) & 0xF;
-        let imm = (instr & 0xFF).rotate_right(rot * 2);
-        format!("msr{cond} {psr}_flg, #0x{imm:x}")
-    } else {
-        panic!()
-    }
-}
-
-fn arm_disasm_mul(instr: u32, _pc: u32) -> String {
-    let cond = disasm_cond(instr);
-    let rd = (instr >> 16) & 0xF;
-    let rn = (instr >> 12) & 0xF;
-    let rs = (instr >> 8) & 0xF;
-    let rm = instr & 0xF;
-    let a = (instr >> 25) & 1;
-    let s = (instr >> 24) & 1;
-    let s = if s == 0 { "" } else { "s" };
-
-    if a == 0 {
-        format!("mul{cond}{s} r{rd}, r{rm}, r{rs}")
-    } else {
-        format!("mla{cond}{s} r{rd}, r{rm}, r{rs}, r{rn}")
-    }
-}
-
-fn arm_disasm_mull(instr: u32, _pc: u32) -> String {
-    let cond = disasm_cond(instr);
-    let rdhi = (instr >> 16) & 0xF;
-    let rdlo = (instr >> 12) & 0xF;
-    let rs = (instr >> 8) & 0xF;
-    let rm = instr & 0xF;
-    let u = (instr >> 26) & 1;
-    let u = if u == 0 { "s" } else { "u" };
-    let a = (instr >> 25) & 1;
-    let s = (instr >> 24) & 1;
-    let s = if s == 0 { "" } else { "s" };
-
-    assert_ne!(rdhi, rdlo);
-    assert_ne!(rdhi, rm);
-    assert_ne!(rdlo, rm);
-    assert_ne!(rdhi, 15);
-    assert_ne!(rdlo, 15);
-
-    let mne = if a == 0 { "mul" } else { "mla" };
-    format!("{u}{mne}{cond}l{s} r{rdlo}, r{rdhi}, r{rm}, r{rs}")
-}
-
-fn arm_disasm_ldst(instr: u32, _pc: u32) -> String {
-    let cond = disasm_cond(instr);
-
-    let i = (instr >> 25) & 1;
-    let pre = (instr >> 24) & 1;
-    let up = (instr >> 23) & 1;
-    let b = (instr >> 22) & 1;
-    let wb = (instr >> 21) & 1;
-    let ld = (instr >> 20) & 1;
-    let rn = (instr >> 16) & 0xF;
-    let rd = (instr >> 12) & 0xF;
-
-    let b = if b == 0 { "" } else { "b" };
-    let t = if pre == 0 && wb == 1 { "t" } else { "" };
-
-    let mne = if ld == 0 { "str" } else { "ldr" };
-
-    let sign = if up == 0 { "-" } else { "" };
-
-    let addr = {
-        let w = if wb == 0 { "" } else { "!" };
-        if i == 0 {
-            let ofs = instr & 0xFFF;
-            if ofs == 0 {
-                assert_eq!(w, "");
-                assert_eq!(pre, 1);
-                format!("[r{rn}]")
-            } else {
-                if pre == 0 {
-                    format!("[r{rn}, #{sign}{ofs}]{w}")
-                } else {
-                    format!("[r{rn}], #{sign}{ofs}")
-                }
-            }
-        } else {
-            let rm = instr & 0xF;
-            let shift_by_reg = (instr >> 4) & 1 != 0;
-
-            assert!(!shift_by_reg);
-
-            let ty = (instr >> 5) & 3;
-
-            const SHIFT_TYPE: [&str; 4] = ["lsl", "lsr", "asr", "ror"];
-            let ty = SHIFT_TYPE[ty as usize];
-
-            let amo = (instr >> 7) & 0x1F;
-            if amo == 0 {
-                if pre == 0 {
-                    format!("[r{rn}, #{sign}r{rm}]{w}")
-                } else {
-                    format!("[r{rn}], #{sign}r{rm}")
-                }
-            } else {
-                if pre == 0 {
-                    format!("[r{rn}, #{sign}r{rm}, {ty} #{amo}]{w}")
-                } else {
-                    format!("[r{rn}], #{sign}r{rm}, {ty} #{amo}")
-                }
-            }
-        }
-    };
-
-    format!("{mne}{cond}{b}{t} r{rd}, {addr}")
-}
-
-fn arm_disasm_ldsth(instr: u32, _pc: u32) -> String {
-    let cond = disasm_cond(instr);
-
-    let pre = (instr >> 24) & 1;
-    let up = (instr >> 23) & 1;
-    let i = (instr >> 22) & 1;
-    let wb = (instr >> 21) & 1;
-    let ld = (instr >> 20) & 1;
-
-    let rn = (instr >> 16) & 0xF;
-    let rd = (instr >> 12) & 0xF;
-
-    let sh = (instr >> 5) & 3;
-
-    let ty = match sh {
-        1 => "h",
-        2 => "sb",
-        3 => "sh",
-        _ => unreachable!(),
-    };
-
-    let mne = if ld == 0 { "str" } else { "ldr" };
-    let w = if wb == 0 { "" } else { "!" };
-    let sign = if up == 0 { "-" } else { "+" };
-
-    let addr = if i == 0 {
-        let rm = instr & 0xF;
-        if pre == 1 {
-            format!("[r{rn}, {sign}r{rm}]{w}")
-        } else {
-            format!("[r{rn}], {sign}r{rm}")
-        }
-    } else {
-        let ofs = (instr & 0xF) | ((instr >> 8) & 0xF << 4);
-
-        if pre == 1 {
-            if ofs == 0 {
-                assert!(w == "");
-                format!("[r{rn}]")
-            } else {
-                format!("[r{rn}, {sign}#0x{ofs}]{w}")
-            }
-        } else {
-            format!("[r{rn}], {sign}#0x{ofs}")
-        }
-    };
-
-    format!("{mne}{cond}{ty} r{rd}, {addr}")
-}
-
 fn arm_disasm_ldstm(instr: u32, _pc: u32) -> String {
     let cond = disasm_cond(instr);
 
@@ -2030,6 +1947,72 @@ fn arm_disasm_ldstm(instr: u32, _pc: u32) -> String {
     format!("{mne}{cond}{suf} r{rn}{wb}, {rlist}{cpsr}")
 }
 
+fn fmt_reglist(reglist: u16) -> String {
+    use std::fmt::Write;
+
+    assert_ne!(reglist, 0);
+    let mut ret = String::new();
+    let reglist = reglist.view_bits::<Lsb0>();
+
+    write!(&mut ret, "{{").unwrap();
+
+    let mut first = true;
+
+    for i in 0..16 {
+        if !(reglist[i] && (i == 0 || !reglist[i - 1])) {
+            continue;
+        }
+
+        let mut j = i;
+        while j + 1 < 16 && reglist[j + 1] {
+            j += 1;
+        }
+
+        if first {
+            first = false;
+        } else {
+            write!(&mut ret, ", ").unwrap();
+        }
+
+        if i == j {
+            write!(&mut ret, "r{i}").unwrap();
+        } else if j - i == 1 {
+            write!(&mut ret, "r{i}, r{j}").unwrap();
+        } else {
+            write!(&mut ret, "r{i}-r{j}").unwrap();
+        }
+    }
+
+    write!(&mut ret, "}}").unwrap();
+
+    ret
+}
+
+fn arm_op_swp<C: Context, const B: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u32) {
+    let rn = ((instr >> 16) & 0xF) as usize;
+    let rd = ((instr >> 12) & 0xF) as usize;
+    let rm = (instr & 0xF) as usize;
+
+    // Do not use R15 as an operand (Rd, Rn or Rs) in a SWP instruction.
+    assert!(rd != 15);
+    assert!(rn != 15);
+    assert!(rm != 15);
+
+    let addr = cpu.regs.r[rn];
+    let src = cpu.regs.r[rm];
+    let data = if !B {
+        u32::load(ctx, addr)
+    } else {
+        u8::load(ctx, addr)
+    };
+    if !B {
+        u32::store(ctx, addr, src);
+    } else {
+        u8::store(ctx, addr, src);
+    }
+    cpu.regs.r[rd] = data;
+}
+
 fn arm_disasm_swp(instr: u32, _pc: u32) -> String {
     // cccc 0001 0B00 nnnn dddd 0000 1001 mmmm
     assert_eq!(instr & 0x0FB00FF0, 0x01000090);
@@ -2043,27 +2026,29 @@ fn arm_disasm_swp(instr: u32, _pc: u32) -> String {
     format!("swp{cond}{b} r{rd}, r{rm}, [r{rn}]")
 }
 
+fn arm_op_swi<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
+    cpu.exception(Exception::SoftwareInterrupt)
+}
+
 fn arm_disasm_swi(instr: u32, _pc: u32) -> String {
     let cond = disasm_cond(instr);
     let comment = instr & 0xFFFFFF;
     format!("swi{cond} #0x{comment:06X}")
 }
 
-fn arm_disasm_cdp(instr: u32, _pc: u32) -> String {
-    let cond = disasm_cond(instr);
-    let cp_opc = (instr >> 20) & 0xF;
-    let crn = (instr >> 16) & 0xF;
-    let crd = (instr >> 12) & 0xF;
-    let cp_num = (instr >> 8) & 0xF;
-    let cp = (instr >> 5) & 7;
-    let crm = instr & 0xF;
-
-    let expr2 = if cp == 0 {
-        "".to_string()
-    } else {
-        format!(", {cp}")
-    };
-    format!("cdp{cond} p{cp_num}, {cp_opc}, c{crd}, c{crn}, c{crm}{expr2}")
+fn arm_op_ldstc<
+    C: Context,
+    const P: bool,
+    const U: bool,
+    const N: bool,
+    const W: bool,
+    const L: bool,
+>(
+    _cpu: &mut Cpu<C>,
+    _ctx: &mut C,
+    _instr: u32,
+) {
+    todo!()
 }
 
 fn arm_disasm_ldstc(instr: u32, _pc: u32) -> String {
@@ -2096,6 +2081,35 @@ fn arm_disasm_ldstc(instr: u32, _pc: u32) -> String {
     return format!("{mne}{cond}{l} p{cp_num}, c{crd}, {addr}");
 }
 
+fn arm_op_cdp<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
+    todo!()
+}
+
+fn arm_disasm_cdp(instr: u32, _pc: u32) -> String {
+    let cond = disasm_cond(instr);
+    let cp_opc = (instr >> 20) & 0xF;
+    let crn = (instr >> 16) & 0xF;
+    let crd = (instr >> 12) & 0xF;
+    let cp_num = (instr >> 8) & 0xF;
+    let cp = (instr >> 5) & 7;
+    let crm = instr & 0xF;
+
+    let expr2 = if cp == 0 {
+        "".to_string()
+    } else {
+        format!(", {cp}")
+    };
+    format!("cdp{cond} p{cp_num}, {cp_opc}, c{crd}, c{crn}, c{crm}{expr2}")
+}
+
+fn arm_op_mrc<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
+    todo!()
+}
+
+fn arm_op_mcr<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
+    todo!()
+}
+
 fn arm_disasm_mrc_mcr(instr: u32, _pc: u32) -> String {
     let cond = disasm_cond(instr);
     let cp_opc = (instr >> 21) & 7;
@@ -2116,45 +2130,70 @@ fn arm_disasm_mrc_mcr(instr: u32, _pc: u32) -> String {
     return format!("{mne}{cond} p{cp_num}, {cp_opc}, r{rd}, c{crn}, c{crm}{expr2}");
 }
 
+fn arm_op_undef<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
+    trace!("Undefined instruction: {:08X}", instr);
+    panic!()
+}
+
 fn arm_disasm_undef(_instr: u32, _pc: u32) -> String {
     "undef".to_string()
+}
+
+fn arm_op_invalid<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
+    trace!("Invalid instruction: {:08X}", instr);
+    panic!()
 }
 
 fn arm_disasm_invalid(_instr: u32, _pc: u32) -> String {
     "invalid".to_string()
 }
 
-fn fmt_reglist(reglist: u16) -> String {
-    use std::fmt::Write;
+fn thumb_op_invalid<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+    trace!("Invalid instruction: {:04X}", instr);
+    panic!()
+}
 
-    assert_ne!(reglist, 0);
-    let mut ret = String::new();
-    let reglist = reglist.view_bits::<Lsb0>();
+impl<C: Context> Cpu<C> {
+    fn dump_regs(&mut self) -> String {
+        use std::fmt::Write;
 
-    write!(&mut ret, "{{").unwrap();
+        let prev_regs = self.prev_regs;
 
-    for i in 0..16 {
-        if !(reglist[i] && (i == 0 || !reglist[i - 1])) {
-            continue;
+        let mode = mode_name(self.regs.mode);
+
+        let mut ret = String::new();
+        write!(
+            &mut ret,
+            "M:{mode} {n}{z}{c}{v}{i}{f}{t}",
+            n = if self.regs.n_flag { 'N' } else { 'n' },
+            z = if self.regs.z_flag { 'Z' } else { 'z' },
+            c = if self.regs.c_flag { 'C' } else { 'c' },
+            v = if self.regs.v_flag { 'V' } else { 'v' },
+            i = if self.regs.irq_disable { 'I' } else { 'i' },
+            f = if self.regs.fiq_disable { 'F' } else { 'f' },
+            t = if self.regs.state { 'T' } else { 't' },
+        )
+        .unwrap();
+
+        for i in 0..=14 {
+            if prev_regs[i] != self.regs.r[i] {
+                write!(&mut ret, " r{i}:{:08X}", self.regs.r[i]).unwrap();
+            }
         }
 
-        let mut j = i;
-        while j + 1 < 16 && reglist[j + 1] {
-            j += 1;
-        }
-
-        if i == j {
-            write!(&mut ret, "r{i}").unwrap();
-        } else if j - i == 1 {
-            write!(&mut ret, "r{i}, r{j}").unwrap();
-        } else {
-            write!(&mut ret, "r{i}-r{j}").unwrap();
-        }
+        self.prev_regs = self.regs.r;
+        ret
     }
 
-    write!(&mut ret, "}}").unwrap();
+    fn disasm_arm(&self, instr: u32, pc: u32) -> String {
+        let ix = (instr >> 16) & 0xFF0 | (instr >> 4) & 0xF;
+        self.arm_disasm_table[ix as usize](instr, pc)
+    }
 
-    ret
+    fn disasm_thumb(&self, instr: u16, pc: u32) -> String {
+        let ix = instr >> 6;
+        self.thumb_disasm_table[ix as usize](instr, pc)
+    }
 }
 
 fn thumb_op_shift<C: Context, const OP: u32>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {

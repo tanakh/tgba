@@ -181,6 +181,39 @@ impl Bus {
     }
 
     pub fn write16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
+        trace!("Write16: {addr:08X} = {data:04X}");
+
+        match (addr >> 24) & 0xF {
+            0x0..=0x1 => {
+                panic!("Write to BIOS");
+            }
+            0x2 => write16(&mut self.ext_ram, (addr & 0x3FFFF) as usize, data),
+            0x3 => write16(&mut self.ram, (addr & 0x7FFF) as usize, data),
+            0x4 => ctx.io_write16(addr & 0x3FF, data),
+            0x5 => {
+                todo!("Palette RAM")
+            }
+            0x6 => {
+                todo!("VRAM")
+            }
+            0x7 => {
+                todo!("OAM")
+            }
+            0x8..=0x9 => {
+                todo!("GamePak Wait State 0")
+            }
+            0xA..=0xB => {
+                todo!("GamePak Wait State 1")
+            }
+            0xC..=0xD => {
+                todo!("GamePak Wait State 2")
+            }
+            0xE..=0xF => {
+                todo!("GamePak RAM")
+            }
+            _ => unreachable!(),
+        }
+
         todo!()
     }
 
@@ -230,6 +263,10 @@ fn read16(p: &[u8], addr: usize) -> u16 {
 
 fn read32(p: &[u8], addr: usize) -> u32 {
     u32::from_le_bytes(p[addr..addr + 4].try_into().unwrap())
+}
+
+fn write16(p: &mut [u8], addr: usize, data: u16) {
+    p[addr..addr + 2].copy_from_slice(&data.to_le_bytes());
 }
 
 fn write32(p: &mut [u8], addr: usize, data: u32) {

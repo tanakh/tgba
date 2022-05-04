@@ -15,7 +15,7 @@ use tgba_core::{Agb, Rom};
 
 #[argopt::cmd]
 fn main(bios: PathBuf, rom: PathBuf) -> Result<()> {
-    env_logger::init();
+    env_logger::builder().format_timestamp(None).init();
 
     let bios = read(&bios)?;
     let rom = load_rom(&rom)?;

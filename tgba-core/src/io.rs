@@ -1,5 +1,7 @@
 // trace_macros!(true);
 
+use std::{fmt::UpperHex, mem::size_of};
+
 use log::trace;
 
 use crate::{context::Interrupt, util::trait_alias};
@@ -196,14 +198,16 @@ fn get_io_reg(addr: u32) -> Option<&'static IoReg> {
     IO_REGS.iter().find(|r| r.addr & 0x3FF == addr)
 }
 
-fn trace_rw(addr: u32, data: u32, size: usize, read: bool) {
+fn trace_rw<T: UpperHex, const READ: bool>(addr: u32, data: T) {
     if !log::log_enabled!(log::Level::Trace) {
         return;
     }
 
-    let data = if size == 8 {
+    let size = size_of::<T>();
+
+    let data = if size == 1 {
         format!("{data:02X}")
-    } else if size == 16 {
+    } else if size == 2 {
         format!("{data:04X}")
     } else {
         format!("{data:08X}")
@@ -215,7 +219,7 @@ fn trace_rw(addr: u32, data: u32, size: usize, read: bool) {
         "N/A".to_string()
     };
 
-    let dir = if read { "Read" } else { "Write" };
+    let dir = if READ { "Read" } else { "Write" };
 
     trace!("{dir}{size}: 0x{addr:03X} = 0x{data} # {annot}");
 }
@@ -229,23 +233,40 @@ impl Io {
         let data = match addr {
             // POSTFLG
             0x300 => self.post_boot,
-            _ => unreachable!(),
+            _ => todo!(
+                "IO read8: 0x{addr:03X} ({})",
+                get_io_reg(addr).map_or("N/A", |r| r.name)
+            ),
         };
 
-        trace_rw(addr, data as u32, 8, true);
+        trace_rw::<u8, true>(addr, data);
         data
     }
 
     pub fn read16(&mut self, ctx: &mut impl Context, addr: u32) -> u16 {
-        todo!()
+        let data = match addr {
+            _ => todo!(
+                "IO read16: 0x{addr:03X} ({})",
+                get_io_reg(addr).map_or("N/A", |r| r.name)
+            ),
+        };
+        trace_rw::<u16, true>(addr, data);
+        data
     }
 
     pub fn read32(&mut self, ctx: &mut impl Context, addr: u32) -> u32 {
-        todo!()
+        let data = match addr {
+            _ => todo!(
+                "IO read32: 0x{addr:03X} ({})",
+                get_io_reg(addr).map_or("N/A", |r| r.name)
+            ),
+        };
+        trace_rw::<u32, true>(addr, data);
+        data
     }
 
     pub fn write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8) {
-        trace_rw(addr, data as u32, 8, false);
+        trace_rw::<u8, false>(addr, data);
 
         match addr {
             // Interrupt Master Enable
@@ -254,15 +275,32 @@ impl Io {
             // POSTFLG
             0x300 => self.post_boot = data,
 
-            _ => unreachable!(),
+            _ => todo!(
+                "IO write8: 0x{addr:03X} ({}) = 0x{data:02X}",
+                get_io_reg(addr).map_or("N/A", |r| r.name)
+            ),
         }
     }
 
     pub fn write16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
-        todo!()
+        trace_rw::<u16, false>(addr, data);
+
+        match addr {
+            _ => todo!(
+                "IO write16: 0x{addr:03X} ({}) = 0x{data:04X}",
+                get_io_reg(addr).map_or("N/A", |r| r.name)
+            ),
+        }
     }
 
     pub fn write32(&mut self, ctx: &mut impl Context, addr: u32, data: u32) {
-        todo!()
+        trace_rw::<u32, false>(addr, data);
+
+        match addr {
+            _ => todo!(
+                "IO write32: 0x{addr:03X} ({}) = 0x{data:08X}",
+                get_io_reg(addr).map_or("N/A", |r| r.name)
+            ),
+        }
     }
 }
