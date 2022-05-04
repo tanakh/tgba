@@ -213,8 +213,6 @@ impl Bus {
             }
             _ => unreachable!(),
         }
-
-        todo!()
     }
 
     pub fn write32(&mut self, ctx: &mut impl Context, addr: u32, data: u32) {

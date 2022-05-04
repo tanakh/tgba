@@ -278,6 +278,8 @@ impl Io {
         trace_rw::<u8, false>(addr, data);
 
         match addr {
+            0x000..=0x056 => ctx.lcd_write8(addr, data),
+
             // Interrupt Master Enable
             0x208 => self.interrupt_master_enable = (data & 1) != 0,
 
@@ -295,6 +297,8 @@ impl Io {
         trace_rw::<u16, false>(addr, data);
 
         match addr {
+            0x000..=0x056 => ctx.lcd_write16(addr, data),
+
             _ => todo!(
                 "IO write16: 0x{addr:03X} ({}) = 0x{data:04X}",
                 get_io_reg(addr).map_or("N/A", |r| r.name)
@@ -306,6 +310,8 @@ impl Io {
         trace_rw::<u32, false>(addr, data);
 
         match addr {
+            0x000..=0x056 => ctx.lcd_write32(addr, data),
+
             _ => todo!(
                 "IO write32: 0x{addr:03X} ({}) = 0x{data:08X}",
                 get_io_reg(addr).map_or("N/A", |r| r.name)

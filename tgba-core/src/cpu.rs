@@ -1828,8 +1828,8 @@ fn arm_disasm_ldsth(instr: u32, _pc: u32) -> String {
 
 fn arm_op_ldstm<
     C: Context,
-    const P: bool,
-    const U: bool,
+    const PRE: bool,
+    const UP: bool,
     const S: bool,
     const W: bool,
     const L: bool,
@@ -1847,9 +1847,27 @@ fn arm_op_ldstm<
     assert_ne!(rn, 15);
 
     let base = cpu.regs.r[rn];
-    let delta = if U { 4 } else { -4_i32 as u32 };
+    let cnt = (instr & 0xFFFF).count_ones();
+    let end = if UP {
+        base.wrapping_add(cnt * 4)
+    } else {
+        base.wrapping_sub(cnt * 4)
+    };
+    let start = if UP {
+        if PRE {
+            base.wrapping_add(4)
+        } else {
+            base
+        }
+    } else {
+        if PRE {
+            end
+        } else {
+            end.wrapping_add(4)
+        }
+    };
 
-    let mut addr = base;
+    // trace!("arm_op_ldstm: base:{base:08x}, pre:{PRE}, up:{UP}, wb:{W}, s:{S}");
 
     let cur_mode = cpu.regs.mode;
 
@@ -1877,17 +1895,16 @@ fn arm_op_ldstm<
         cpu.regs.change_mode(MODE_USER);
     }
 
+    let mut addr = start;
+
     for i in 0..16 {
         if instr & (1 << i) == 0 {
             continue;
         }
 
-        if P {
-            addr = addr.wrapping_add(delta);
-        }
-
         if L {
             let data = u32::load(ctx, addr);
+            // trace!("LDM[{i:02}]: 0x{addr:08X} = 0x{data:08X}");
             if i != 15 {
                 cpu.regs.r[i] = data;
             } else {
@@ -1897,12 +1914,11 @@ fn arm_op_ldstm<
             // Whenever R15 is stored to memory the stored value is the address of the STM
             // instruction plus 12.
             let data = cpu.regs.r[i].wrapping_add(if i == 15 { 4 } else { 0 });
+            // trace!("STM[{i:02}]: 0x{addr:08X} = 0x{data:08X}");
             u32::store(ctx, addr, data);
         }
 
-        if !P {
-            addr = addr.wrapping_add(delta);
-        }
+        addr = addr.wrapping_add(4)
     }
 
     if user_bank {
@@ -1911,7 +1927,7 @@ fn arm_op_ldstm<
 
     if W {
         assert!(!user_bank);
-        cpu.regs.r[rn] = addr;
+        cpu.regs.r[rn] = end;
     }
 }
 
@@ -2400,7 +2416,7 @@ fn thumb_op_hireg<C: Context, const OP: usize, const H1: bool, const H2: bool>(
     };
 
     if let Some(res) = res {
-        if rd == 15 {
+        if rd != 15 {
             cpu.regs.r[rd] = res;
         } else {
             cpu.set_pc(res);
@@ -2591,37 +2607,50 @@ fn thumb_disasm_add_sp(instr: u16, _pc: u32) -> String {
     format!("{mne} sp, #{sign}{ofs}")
 }
 
+fn block_trans<C: Context, const L: bool, const R: bool>(
+    cpu: &mut Cpu<C>,
+    ctx: &mut C,
+    rb: usize,
+    rlist: u16,
+) {
+    let cnt = rlist.count_ones() + R as u32;
+
+    let base = cpu.regs.r[rb];
+    let end = if !L {
+        base.wrapping_sub(cnt * 4)
+    } else {
+        base.wrapping_add(cnt * 4)
+    };
+    let start = if !L { end } else { base };
+
+    let mut addr = start;
+    for i in 0..8 {
+        if rlist & (1 << i) != 0 {
+            continue;
+        }
+        if !L {
+            u32::store(ctx, addr, cpu.regs.r[i]);
+        } else {
+            cpu.regs.r[i] = u32::load(ctx, addr);
+        }
+        addr = addr.wrapping_add(4);
+    }
+    if R {
+        if !L {
+            u32::store(ctx, addr, cpu.regs.r[14]);
+        } else {
+            cpu.set_pc(u32::load(ctx, addr));
+        }
+    }
+    cpu.regs.r[rb] = end;
+}
+
 fn thumb_op_push_pop<C: Context, const L: bool, const R: bool>(
     cpu: &mut Cpu<C>,
     ctx: &mut C,
     instr: u16,
 ) {
-    let rlist = instr & 0xFF;
-    let mut addr = cpu.regs.r[13];
-    if !L {
-        for i in 0..8 {
-            if rlist & (1 << i) != 0 {
-                addr = addr.wrapping_sub(4);
-                u32::store(ctx, addr, cpu.regs.r[i]);
-            }
-        }
-        if R {
-            addr = addr.wrapping_sub(4);
-            u32::store(ctx, addr, cpu.regs.r[14]);
-        }
-    } else {
-        for i in 0..8 {
-            if rlist & (1 << i) != 0 {
-                cpu.regs.r[i] = u32::load(ctx, addr);
-                addr = addr.wrapping_add(4);
-            }
-        }
-        if R {
-            cpu.set_pc(u32::load(ctx, addr));
-            addr = addr.wrapping_add(4);
-        }
-    }
-    cpu.regs.r[13] = addr;
+    block_trans::<C, L, R>(cpu, ctx, 13, instr & 0xFF)
 }
 
 fn thumb_disasm_push_pop(instr: u16, _pc: u32) -> String {
@@ -2636,25 +2665,7 @@ fn thumb_disasm_push_pop(instr: u16, _pc: u32) -> String {
 fn thumb_op_ldstm<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
     let rb = ((instr >> 8) & 7) as usize;
     let rlist = instr & 0xFF;
-
-    let mut addr = cpu.regs.r[rb];
-    if !L {
-        for i in 0..8 {
-            if rlist & (1 << i) != 0 {
-                u32::store(ctx, addr, cpu.regs.r[i]);
-                addr = addr.wrapping_add(4);
-            }
-        }
-    } else {
-        // FIXME: rb in rlist?
-        for i in 0..8 {
-            if rlist & (1 << i) != 0 {
-                cpu.regs.r[i] = u32::load(ctx, addr);
-                addr = addr.wrapping_add(4);
-            }
-        }
-    }
-    cpu.regs.r[rb] = addr;
+    block_trans::<C, L, false>(cpu, ctx, rb, rlist);
 }
 
 fn thumb_disasm_ldstm(instr: u16, _pc: u32) -> String {
@@ -2701,15 +2712,16 @@ fn thumb_disasm_b(instr: u16, pc: u32) -> String {
 }
 
 fn thumb_op_bl<C: Context, const H: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
-    let offset = (((instr as u32) << 21) as i32) >> 21;
     if !H {
+        let offset = (((instr as u32) << 21) as i32) >> 21;
         let lr = cpu.regs.r[15]
             .wrapping_add(2)
             .wrapping_add((offset << 12) as u32);
         cpu.regs.r[14] = lr;
     } else {
+        let offset = (instr & 0x7FF) as u32;
         let ret_addr = cpu.regs.r[15];
-        let new_pc = cpu.regs.r[14].wrapping_add((offset * 2) as u32);
+        let new_pc = cpu.regs.r[14].wrapping_add(offset * 2);
         cpu.set_pc(new_pc);
         cpu.regs.r[14] = ret_addr | 1;
     }
