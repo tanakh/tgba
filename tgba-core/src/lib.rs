@@ -4,7 +4,9 @@ mod bus;
 mod context;
 mod cpu;
 mod io;
+mod lcd;
 mod rom;
+mod sound;
 mod util;
 
 use context::Context;

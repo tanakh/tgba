@@ -1,4 +1,4 @@
-use crate::{bus, cpu, io, rom::Rom};
+use crate::{bus, cpu, io, lcd, rom::Rom, sound};
 
 pub trait Bus {
     fn read8(&mut self, addr: u32) -> u8;
@@ -18,6 +18,26 @@ pub trait Io {
     fn io_write8(&mut self, addr: u32, data: u8);
     fn io_write16(&mut self, addr: u32, data: u16);
     fn io_write32(&mut self, addr: u32, data: u32);
+}
+
+pub trait Lcd {
+    fn lcd_read8(&mut self, addr: u32) -> u8;
+    fn lcd_read16(&mut self, addr: u32) -> u16;
+    fn lcd_read32(&mut self, addr: u32) -> u32;
+
+    fn lcd_write8(&mut self, addr: u32, data: u8);
+    fn lcd_write16(&mut self, addr: u32, data: u16);
+    fn lcd_write32(&mut self, addr: u32, data: u32);
+}
+
+pub trait Sound {
+    fn sound_read8(&mut self, addr: u32) -> u8;
+    fn sound_read16(&mut self, addr: u32) -> u16;
+    fn sound_read32(&mut self, addr: u32) -> u32;
+
+    fn sound_write8(&mut self, addr: u32, data: u8);
+    fn sound_write16(&mut self, addr: u32, data: u16);
+    fn sound_write32(&mut self, addr: u32, data: u32);
 }
 
 pub trait Interrupt {
@@ -43,6 +63,12 @@ pub struct Inner2 {
 }
 
 pub struct Inner3 {
+    lcd: lcd::Lcd,
+    sound: sound::Sound,
+    inner: Inner4,
+}
+
+pub struct Inner4 {
     irq: bool,
     fiq: bool,
 }
@@ -52,6 +78,8 @@ impl Context {
         let cpu = cpu::Cpu::new();
         let bus = bus::Bus::new(bios, rom);
         let io = io::Io::new();
+        let lcd = lcd::Lcd::new();
+        let sound = sound::Sound::new();
 
         Context {
             cpu,
@@ -60,8 +88,12 @@ impl Context {
                 inner: Inner2 {
                     io,
                     inner: Inner3 {
-                        irq: false,
-                        fiq: false,
+                        lcd,
+                        sound,
+                        inner: Inner4 {
+                            irq: false,
+                            fiq: false,
+                        },
                     },
                 },
             },
@@ -121,6 +153,58 @@ impl Io for Inner2 {
     }
 }
 
+impl Lcd for Inner3 {
+    fn lcd_read8(&mut self, addr: u32) -> u8 {
+        self.lcd.read8(&mut self.inner, addr)
+    }
+
+    fn lcd_read16(&mut self, addr: u32) -> u16 {
+        self.lcd.read16(&mut self.inner, addr)
+    }
+
+    fn lcd_read32(&mut self, addr: u32) -> u32 {
+        self.lcd.read32(&mut self.inner, addr)
+    }
+
+    fn lcd_write8(&mut self, addr: u32, data: u8) {
+        self.lcd.write8(&mut self.inner, addr, data)
+    }
+
+    fn lcd_write16(&mut self, addr: u32, data: u16) {
+        self.lcd.write16(&mut self.inner, addr, data)
+    }
+
+    fn lcd_write32(&mut self, addr: u32, data: u32) {
+        self.lcd.write32(&mut self.inner, addr, data)
+    }
+}
+
+impl Sound for Inner3 {
+    fn sound_read8(&mut self, addr: u32) -> u8 {
+        self.sound.read8(&mut self.inner, addr)
+    }
+
+    fn sound_read16(&mut self, addr: u32) -> u16 {
+        self.sound.read16(&mut self.inner, addr)
+    }
+
+    fn sound_read32(&mut self, addr: u32) -> u32 {
+        self.sound.read32(&mut self.inner, addr)
+    }
+
+    fn sound_write8(&mut self, addr: u32, data: u8) {
+        self.sound.write8(&mut self.inner, addr, data)
+    }
+
+    fn sound_write16(&mut self, addr: u32, data: u16) {
+        self.sound.write16(&mut self.inner, addr, data)
+    }
+
+    fn sound_write32(&mut self, addr: u32, data: u32) {
+        self.sound.write32(&mut self.inner, addr, data)
+    }
+}
+
 impl Interrupt for Inner {
     fn irq(&self) -> bool {
         self.inner.irq()
@@ -158,6 +242,24 @@ impl Interrupt for Inner2 {
 }
 
 impl Interrupt for Inner3 {
+    fn irq(&self) -> bool {
+        self.inner.irq()
+    }
+
+    fn set_irq(&mut self, irq: bool) {
+        self.inner.set_irq(irq)
+    }
+
+    fn fiq(&self) -> bool {
+        self.inner.fiq()
+    }
+
+    fn set_fiq(&mut self, fiq: bool) {
+        self.inner.set_fiq(fiq)
+    }
+}
+
+impl Interrupt for Inner4 {
     fn irq(&self) -> bool {
         self.irq
     }

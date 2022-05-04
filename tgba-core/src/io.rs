@@ -4,9 +4,12 @@ use std::{fmt::UpperHex, mem::size_of};
 
 use log::trace;
 
-use crate::{context::Interrupt, util::trait_alias};
+use crate::{
+    context::{Interrupt, Lcd},
+    util::trait_alias,
+};
 
-trait_alias!(pub trait Context = Interrupt);
+trait_alias!(pub trait Context = Lcd + Interrupt);
 
 #[derive(Default)]
 pub struct Io {
@@ -231,6 +234,8 @@ impl Io {
 
     pub fn read8(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
         let data = match addr {
+            0x000..=0x056 => ctx.lcd_read8(addr),
+
             // POSTFLG
             0x300 => self.post_boot,
             _ => todo!(
@@ -245,6 +250,8 @@ impl Io {
 
     pub fn read16(&mut self, ctx: &mut impl Context, addr: u32) -> u16 {
         let data = match addr {
+            0x000..=0x056 => ctx.lcd_read16(addr),
+
             _ => todo!(
                 "IO read16: 0x{addr:03X} ({})",
                 get_io_reg(addr).map_or("N/A", |r| r.name)
@@ -256,6 +263,8 @@ impl Io {
 
     pub fn read32(&mut self, ctx: &mut impl Context, addr: u32) -> u32 {
         let data = match addr {
+            0x000..=0x056 => ctx.lcd_read32(addr),
+
             _ => todo!(
                 "IO read32: 0x{addr:03X} ({})",
                 get_io_reg(addr).map_or("N/A", |r| r.name)
