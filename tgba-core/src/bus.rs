@@ -67,7 +67,42 @@ impl Bus {
     }
 
     pub fn read16(&mut self, ctx: &mut impl Context, addr: u32) -> u16 {
-        todo!()
+        trace!("Read16: {addr:08X}");
+
+        match (addr >> 24) & 0xF {
+            0x0..=0x1 => {
+                if addr < 0x00004000 {
+                    read16(&self.bios, addr as usize)
+                } else {
+                    panic!()
+                }
+            }
+            0x2 => read16(&self.ext_ram, (addr & 0x3FFFF) as usize),
+            0x3 => read16(&self.ram, (addr & 0x7FFF) as usize),
+            0x4 => ctx.io_read16(addr & 0x3FF),
+            0x5 => {
+                todo!("Palette RAM")
+            }
+            0x6 => {
+                todo!("VRAM")
+            }
+            0x7 => {
+                todo!("OAM")
+            }
+            0x8..=0x9 => {
+                todo!("GamePak Wait State 0")
+            }
+            0xA..=0xB => {
+                todo!("GamePak Wait State 1")
+            }
+            0xC..=0xD => {
+                todo!("GamePak Wait State 2")
+            }
+            0xE..=0xF => {
+                todo!("GamePak RAM")
+            }
+            _ => unreachable!(),
+        }
     }
 
     pub fn read32(&mut self, ctx: &mut impl Context, addr: u32) -> u32 {
@@ -187,6 +222,10 @@ impl Bus {
             _ => unreachable!(),
         }
     }
+}
+
+fn read16(p: &[u8], addr: usize) -> u16 {
+    u16::from_le_bytes(p[addr..addr + 2].try_into().unwrap())
 }
 
 fn read32(p: &[u8], addr: usize) -> u32 {

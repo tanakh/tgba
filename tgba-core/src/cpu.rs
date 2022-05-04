@@ -1,5 +1,6 @@
 use bitvec::prelude::*;
 use log::trace;
+use std::mem::size_of;
 
 use crate::{
     context::{Bus, Interrupt},
@@ -11,12 +12,18 @@ trait_alias!(pub trait Context = Bus + Interrupt);
 type ArmOp<C> = fn(&mut Cpu<C>, &mut C, u32);
 type ArmDisasm = fn(u32, u32) -> String;
 
+type ThumbOp<C> = fn(&mut Cpu<C>, &mut C, u16);
+type ThumbDisasm = fn(u16, u32) -> String;
+
 pub struct Cpu<C: Context> {
     regs: Registers,
     pc_changed: bool,
 
     arm_op_table: [ArmOp<C>; 0x1000],
     arm_disasm_table: [ArmDisasm; 0x1000],
+
+    thumb_op_table: [ThumbOp<C>; 0x400],
+    thumb_disasm_table: [ThumbDisasm; 0x400],
 }
 
 enum Exception {
@@ -230,12 +237,15 @@ fn reg_bank(mode: u8) -> (&'static [usize; 16], Option<usize>) {
 impl<C: Context> Cpu<C> {
     pub fn new() -> Self {
         let (arm_op_table, arm_disasm_table) = build_arm_table();
+        let (thumb_op_table, thumb_disasm_table) = build_thumb_table();
 
         Cpu {
             regs: Registers::default(),
             pc_changed: false,
             arm_op_table,
             arm_disasm_table,
+            thumb_op_table,
+            thumb_disasm_table,
         }
     }
 
@@ -276,7 +286,7 @@ impl<C: Context> Cpu<C> {
 
         if log::log_enabled!(log::Level::Trace) {
             let pc = self.regs.r[15].wrapping_sub(4);
-            let s = self.disasm(instr, pc);
+            let s = self.disasm_arm(instr, pc);
             trace!(
                 "{pc:08X}: {instr:08X}: {s:24} CPSR:{n}{z}{c}{v}{i}{f}{t}",
                 n = if self.regs.n_flag { 'N' } else { 'n' },
@@ -302,16 +312,42 @@ impl<C: Context> Cpu<C> {
         }
     }
 
-    fn exec_thumb(&mut self, ctx: &mut impl Context) {
-        todo!()
+    fn exec_thumb(&mut self, ctx: &mut C) {
+        let instr = self.fetch16(ctx);
+
+        if log::log_enabled!(log::Level::Trace) {
+            let pc = self.regs.r[15].wrapping_sub(2);
+            let s = self.disasm_thumb(instr, pc);
+            trace!(
+                "{pc:08X}:     {instr:04X}: {s:24} CPSR:{n}{z}{c}{v}{i}{f}{t}",
+                n = if self.regs.n_flag { 'N' } else { 'n' },
+                z = if self.regs.z_flag { 'Z' } else { 'z' },
+                c = if self.regs.c_flag { 'C' } else { 'c' },
+                v = if self.regs.v_flag { 'V' } else { 'v' },
+                i = if self.regs.irq_disable { 'I' } else { 'i' },
+                f = if self.regs.fiq_disable { 'F' } else { 'f' },
+                t = if self.regs.state { 'T' } else { 't' },
+            );
+        }
+
+        let ix = instr >> 6;
+        self.thumb_op_table[ix as usize](self, ctx, instr);
     }
 
     fn fetch32(&mut self, ctx: &mut impl Context) -> u32 {
         let pc = self.regs.r[15];
         assert_eq!(pc & 0x3, 0);
 
-        self.regs.r[15] += 4;
+        self.regs.r[15] = self.regs.r[15].wrapping_add(4);
         ctx.read32(pc)
+    }
+
+    fn fetch16(&mut self, ctx: &mut impl Context) -> u16 {
+        let pc = self.regs.r[15];
+        assert_eq!(pc & 0x1, 0);
+
+        self.regs.r[15] = self.regs.r[15].wrapping_add(2);
+        ctx.read16(pc)
     }
 }
 
@@ -713,6 +749,196 @@ fn build_arm_table<C: Context>() -> ([ArmOp<C>; 0x1000], [ArmDisasm; 0x1000]) {
             op_tbl[(hi << 4) | lo] = op;
             disasm_tbl[(hi << 4) | lo] = disasm;
         }
+    }
+
+    (op_tbl, disasm_tbl)
+}
+
+fn build_thumb_table<C: Context>() -> ([ThumbOp<C>; 0x400], [ThumbDisasm; 0x400]) {
+    let mut op_tbl = [thumb_op_invalid as ThumbOp<C>; 0x400];
+    let mut disasm_tbl = [thumb_disasm_invalid as ThumbDisasm; 0x400];
+
+    let invalid = |ix: usize| -> ThumbOp<C> {
+        trace!(
+            "Invalid thumb instruction {:04b} {:04b} {:02b}.. ....",
+            (ix >> 6),
+            (ix >> 2) & 0b1111,
+            ix & 0b11
+        );
+        thumb_op_invalid
+    };
+
+    for ix in 0..0x400 {
+        let (op, disasm): (ThumbOp<C>, ThumbDisasm) = if (ix >> 7) == 0b000 {
+            match (ix >> 5) & 3 {
+                0 => (thumb_op_shift::<C, 0>, thumb_disasm_shift),
+                1 => (thumb_op_shift::<C, 1>, thumb_disasm_shift),
+                2 => (thumb_op_shift::<C, 2>, thumb_disasm_shift),
+                3 => match (ix >> 3) & 3 {
+                    0b00 => (thumb_op_add_sub::<C, false, false>, thumb_disasm_add_sub),
+                    0b01 => (thumb_op_add_sub::<C, false, true>, thumb_disasm_add_sub),
+                    0b10 => (thumb_op_add_sub::<C, true, false>, thumb_disasm_add_sub),
+                    0b11 => (thumb_op_add_sub::<C, true, true>, thumb_disasm_add_sub),
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            }
+        } else if (ix >> 7) == 0b001 {
+            let op = match (ix >> 5) & 3 {
+                0 => thumb_op_alu_imm8::<C, 0>,
+                1 => thumb_op_alu_imm8::<C, 1>,
+                2 => thumb_op_alu_imm8::<C, 2>,
+                3 => thumb_op_alu_imm8::<C, 3>,
+                _ => unreachable!(),
+            };
+            (op, thumb_disasm_alu_imm8)
+        } else if (ix >> 4) == 0b010000 {
+            let op = match ix & 0b1111 {
+                0 => thumb_op_alu::<C, 0>,
+                1 => thumb_op_alu::<C, 1>,
+                2 => thumb_op_alu::<C, 2>,
+                3 => thumb_op_alu::<C, 3>,
+                4 => thumb_op_alu::<C, 4>,
+                5 => thumb_op_alu::<C, 5>,
+                6 => thumb_op_alu::<C, 6>,
+                7 => thumb_op_alu::<C, 7>,
+                8 => thumb_op_alu::<C, 8>,
+                9 => thumb_op_alu::<C, 9>,
+                10 => thumb_op_alu::<C, 10>,
+                11 => thumb_op_alu::<C, 11>,
+                12 => thumb_op_alu::<C, 12>,
+                13 => thumb_op_alu::<C, 13>,
+                14 => thumb_op_alu::<C, 14>,
+                15 => thumb_op_alu::<C, 15>,
+                _ => unreachable!(),
+            };
+            (op, thumb_disasm_alu)
+        } else if (ix >> 4) == 0b010001 {
+            let op = match ix & 0b1111 {
+                0b0001 => thumb_op_hireg::<C, 0, false, true>,
+                0b0010 => thumb_op_hireg::<C, 0, true, false>,
+                0b0011 => thumb_op_hireg::<C, 0, true, true>,
+
+                0b0101 => thumb_op_hireg::<C, 1, false, true>,
+                0b0110 => thumb_op_hireg::<C, 1, true, false>,
+                0b0111 => thumb_op_hireg::<C, 1, true, true>,
+
+                0b1001 => thumb_op_hireg::<C, 2, false, true>,
+                0b1010 => thumb_op_hireg::<C, 2, true, false>,
+                0b1011 => thumb_op_hireg::<C, 2, true, true>,
+
+                0b1100 => thumb_op_bx::<C, false>,
+                0b1101 => thumb_op_bx::<C, true>,
+
+                _ => invalid(ix),
+            };
+            (op, thumb_disasm_hireg)
+        } else if (ix >> 5) == 0b01001 {
+            (thumb_op_ld_pcrel, thumb_disasm_ld_pcrel)
+        } else if (ix >> 6) == 0b0101 {
+            let op = match ix & 0b111 {
+                0b000 => thumb_op_ldst::<C, false, u32>,
+                0b010 => thumb_op_ldst::<C, false, u8>,
+                0b100 => thumb_op_ldst::<C, true, u32>,
+                0b110 => thumb_op_ldst::<C, true, u8>,
+                0b001 => thumb_op_ldst::<C, false, u16>,
+                0b011 => thumb_op_ldst::<C, true, i8>,
+                0b101 => thumb_op_ldst::<C, true, u16>,
+                0b111 => thumb_op_ldst::<C, true, i16>,
+                _ => unreachable!(),
+            };
+            (op, thumb_disasm_ldst)
+        } else if (ix >> 7) == 0b011 {
+            let op = match (ix >> 5) & 3 {
+                0b00 => thumb_op_ldst_ofs::<C, false, u32>,
+                0b01 => thumb_op_ldst_ofs::<C, true, u32>,
+                0b10 => thumb_op_ldst_ofs::<C, false, u8>,
+                0b11 => thumb_op_ldst_ofs::<C, true, u8>,
+                _ => unreachable!(),
+            };
+            (op, thumb_disasm_ldst_ofs)
+        } else if (ix >> 6) == 0b1000 {
+            let op = if (ix >> 5) & 1 == 0 {
+                thumb_op_ldst_ofs::<C, false, u16>
+            } else {
+                thumb_op_ldst_ofs::<C, true, u16>
+            };
+            (op, thumb_disasm_ldst_ofs)
+        } else if (ix >> 6) == 0b1001 {
+            let op = if (ix >> 5) & 1 == 0 {
+                thumb_op_ldst_sprel::<C, false>
+            } else {
+                thumb_op_ldst_sprel::<C, true>
+            };
+            (op, thumb_disasm_ldst_sprel)
+        } else if (ix >> 6) == 0b1010 {
+            let op = if (ix >> 5) & 1 == 0 {
+                thumb_op_load_addr::<C, false>
+            } else {
+                thumb_op_load_addr::<C, true>
+            };
+            (op, thumb_disasm_load_addr)
+        } else if (ix >> 2) == 0b10110000 {
+            let op = if (ix >> 1) & 1 == 0 {
+                thumb_op_add_sp::<C, false>
+            } else {
+                thumb_op_add_sp::<C, true>
+            };
+            (op, thumb_disasm_add_sp)
+        } else if (ix >> 2) & 0b11110110 == 0b10110100 {
+            let op = match (ix >> 2) & 0x1001 {
+                0b0000 => thumb_op_push_pop::<C, false, false>,
+                0b0001 => thumb_op_push_pop::<C, false, true>,
+                0b1000 => thumb_op_push_pop::<C, true, false>,
+                0b1001 => thumb_op_push_pop::<C, true, true>,
+                _ => unreachable!(),
+            };
+            (op, thumb_disasm_push_pop)
+        } else if (ix >> 6) == 0b1100 {
+            let op = if (ix >> 5) & 1 == 0 {
+                thumb_op_ldstm::<C, false>
+            } else {
+                thumb_op_ldstm::<C, true>
+            };
+            (op, thumb_disasm_ldstm)
+        } else if (ix >> 6) == 0b1101 {
+            let op = match (ix >> 2) & 15 {
+                0 => thumb_op_cond_branch::<C, 0>,
+                1 => thumb_op_cond_branch::<C, 1>,
+                2 => thumb_op_cond_branch::<C, 2>,
+                3 => thumb_op_cond_branch::<C, 3>,
+                4 => thumb_op_cond_branch::<C, 4>,
+                5 => thumb_op_cond_branch::<C, 5>,
+                6 => thumb_op_cond_branch::<C, 6>,
+                7 => thumb_op_cond_branch::<C, 7>,
+                8 => thumb_op_cond_branch::<C, 8>,
+                9 => thumb_op_cond_branch::<C, 9>,
+                10 => thumb_op_cond_branch::<C, 10>,
+                11 => thumb_op_cond_branch::<C, 11>,
+                12 => thumb_op_cond_branch::<C, 12>,
+                13 => thumb_op_cond_branch::<C, 13>,
+                14 => thumb_op_cond_branch::<C, 14>,
+                15 => thumb_op_cond_branch::<C, 15>,
+                _ => unreachable!(),
+            };
+            (op, thumb_disasm_cond_branch)
+        } else if (ix >> 2) == 0b11011111 {
+            (thumb_op_swi, thumb_disasm_swi)
+        } else if (ix >> 5) == 0b11100 {
+            (thumb_op_b, thumb_disasm_b)
+        } else if (ix >> 6) == 0b1111 {
+            let op = if (ix >> 5) & 1 == 0 {
+                thumb_op_bl::<C, false>
+            } else {
+                thumb_op_bl::<C, true>
+            };
+            (op, thumb_disasm_bl)
+        } else {
+            (invalid(ix), thumb_disasm_invalid)
+        };
+
+        op_tbl[ix] = op;
+        disasm_tbl[ix] = disasm;
     }
 
     (op_tbl, disasm_tbl)
@@ -1470,19 +1696,29 @@ fn arm_op_mcr<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
 }
 
 fn arm_op_undef<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
-    trace!("Undefined instruction: {:08x}", instr);
+    trace!("Undefined instruction: {:08X}", instr);
     panic!()
 }
 
 fn arm_op_invalid<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
-    trace!("Invalid instruction: {:08x}", instr);
+    trace!("Invalid instruction: {:08X}", instr);
+    panic!()
+}
+
+fn thumb_op_invalid<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+    trace!("Invalid instruction: {:04X}", instr);
     panic!()
 }
 
 impl<C: Context> Cpu<C> {
-    fn disasm(&self, instr: u32, pc: u32) -> String {
+    fn disasm_arm(&self, instr: u32, pc: u32) -> String {
         let ix = (instr >> 16) & 0xFF0 | (instr >> 4) & 0xF;
         self.arm_disasm_table[ix as usize](instr, pc)
+    }
+
+    fn disasm_thumb(&self, instr: u16, pc: u32) -> String {
+        let ix = instr >> 6;
+        self.thumb_disasm_table[ix as usize](instr, pc)
     }
 }
 
@@ -1919,4 +2155,538 @@ fn fmt_reglist(reglist: u16) -> String {
     write!(&mut ret, "}}").unwrap();
 
     ret
+}
+
+fn thumb_op_shift<C: Context, const Op: u32>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let offset = (instr >> 6) & 0x1F;
+    let rs = ((instr >> 3) & 0x7) as usize;
+    let rd = (instr & 0x7) as usize;
+
+    // FIXME: is this correct?
+    let (res, carry) = if Op == 0 && offset == 0 {
+        (cpu.regs.r[rs], cpu.regs.c_flag)
+    } else {
+        let offset = if offset == 0 { 32 } else { offset };
+        calc_sft(Op, cpu.regs.r[rs], offset as u8)
+    };
+
+    cpu.regs.c_flag = carry;
+    cpu.regs.set_nz(res);
+    cpu.regs.r[rd] = res;
+}
+
+fn thumb_disasm_shift(instr: u16, pc: u32) -> String {
+    let op = (instr >> 11) & 3;
+    let offset = (instr >> 6) & 0x1F;
+    let rs = (instr >> 3) & 0x7;
+    let rd = instr & 0x7;
+
+    let mne = match op {
+        0 => "lsl",
+        1 => "lsr",
+        2 => "asr",
+        _ => unreachable!(),
+    };
+    format!("{mne} r{rd}, r{rs}, #{offset}")
+}
+
+fn thumb_op_add_sub<C: Context, const I: bool, const Op: bool>(
+    cpu: &mut Cpu<C>,
+    ctx: &mut C,
+    instr: u16,
+) {
+    let rs = ((instr >> 3) & 0x7) as usize;
+    let rd = (instr & 0x7) as usize;
+
+    let op1 = cpu.regs.r[rs];
+    let op2 = if !I {
+        let rn = ((instr >> 6) & 0x7) as usize;
+        cpu.regs.r[rn]
+    } else {
+        ((instr >> 6) & 7) as u32
+    };
+
+    let res = if !Op {
+        alu::<C, 0b0100>(cpu, op1, op2, true)
+    } else {
+        alu::<C, 0b0010>(cpu, op1, op2, true)
+    };
+
+    cpu.regs.r[rd] = res.unwrap();
+}
+
+fn thumb_disasm_add_sub(instr: u16, pc: u32) -> String {
+    let imm = (instr >> 10) & 1 != 0;
+    let op = (instr >> 9) & 1;
+    let rs = (instr >> 3) & 0x7;
+    let rd = instr & 0x7;
+    let mne = if (instr >> 9) & 1 == 0 { "add" } else { "sub" };
+
+    if imm {
+        let ofs = (instr >> 6) & 7;
+        format!("{mne} r{rd}, r{rs}, #{ofs}")
+    } else {
+        let rn = (instr >> 6) & 7;
+        format!("{mne} r{rd}, r{rs}, r{rn}")
+    }
+}
+
+fn thumb_op_alu_imm8<C: Context, const Op: usize>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let rd = ((instr >> 8) & 0x7) as usize;
+    let op1 = cpu.regs.r[rd];
+    let op2 = (instr & 0xFF) as u32;
+    let res = match Op {
+        0 => alu::<C, 0b1101>(cpu, op1, op2, true),
+        1 => alu::<C, 0b1010>(cpu, op1, op2, true),
+        2 => alu::<C, 0b0100>(cpu, op1, op2, true),
+        3 => alu::<C, 0b0010>(cpu, op1, op2, true),
+        _ => unreachable!(),
+    };
+    if let Some(res) = res {
+        cpu.regs.r[rd] = res;
+    }
+}
+
+fn thumb_disasm_alu_imm8(instr: u16, pc: u32) -> String {
+    let op = (instr >> 11) & 3;
+    let rd = (instr >> 8) & 0x7;
+    let ofs = instr & 0xFF;
+    let mne = match op {
+        0 => "mov",
+        1 => "cmp",
+        2 => "add",
+        3 => "sub",
+        _ => unreachable!(),
+    };
+    format!("{mne} r{rd}, #{ofs}")
+}
+
+fn thumb_op_alu<C: Context, const Op: usize>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let rs = ((instr >> 3) & 0x7) as usize;
+    let rd = (instr & 0x7) as usize;
+
+    let op1 = cpu.regs.r[rd];
+    let op2 = cpu.regs.r[rs];
+
+    let res = match Op {
+        0b0000 => alu::<C, 0b0000>(cpu, op1, op2, true),
+        0b0001 => alu::<C, 0b0001>(cpu, op1, op2, true),
+        0b0010 => {
+            let (op2, carry) = calc_sft(0, op1, op2 as u8);
+            cpu.regs.c_flag = carry;
+            alu::<C, 0b1101>(cpu, op1, op2, true)
+        }
+        0b0011 => {
+            let (op2, carry) = calc_sft(1, op1, op2 as u8);
+            cpu.regs.c_flag = carry;
+            alu::<C, 0b1101>(cpu, op1, op2, true)
+        }
+        0b0100 => {
+            let (op2, carry) = calc_sft(2, op1, op2 as u8);
+            cpu.regs.c_flag = carry;
+            alu::<C, 0b1101>(cpu, op1, op2, true)
+        }
+        0b0101 => alu::<C, 0b0101>(cpu, op1, op2, true),
+        0b0110 => alu::<C, 0b0110>(cpu, op1, op2, true),
+        0b0111 => {
+            let (op2, carry) = calc_sft(3, op1, op2 as u8);
+            cpu.regs.c_flag = carry;
+            alu::<C, 0b1101>(cpu, op1, op2, true)
+        }
+        0b1000 => alu::<C, 0b1000>(cpu, op1, op2, true),
+        0b1001 => alu::<C, 0b0011>(cpu, op2, 0, true),
+        0b1010 => alu::<C, 0b1010>(cpu, op1, op2, true),
+        0b1011 => alu::<C, 0b1011>(cpu, op1, op2, true),
+        0b1100 => alu::<C, 0b1100>(cpu, op1, op2, true),
+        0b1101 => {
+            let res = op1.wrapping_mul(op2);
+            cpu.regs.set_nz(res);
+            Some(res)
+        }
+        0b1110 => alu::<C, 0b1110>(cpu, op1, op2, true),
+        0b1111 => alu::<C, 0b1111>(cpu, op1, op2, true),
+        _ => unreachable!(),
+    };
+
+    if let Some(res) = res {
+        cpu.regs.r[rd] = res;
+    }
+}
+
+fn thumb_disasm_alu(instr: u16, pc: u32) -> String {
+    let op = (instr >> 6) & 0x1F;
+    let rs = (instr >> 3) & 0x7;
+    let rd = instr & 0x7;
+    let mne = match op {
+        0 => "and",
+        1 => "eor",
+        2 => "lsl",
+        3 => "lsr",
+        4 => "asr",
+        5 => "adc",
+        6 => "sbc",
+        7 => "ror",
+        8 => "tst",
+        9 => "neg",
+        10 => "cmp",
+        11 => "cmn",
+        12 => "orr",
+        13 => "mul",
+        14 => "bic",
+        15 => "mvn",
+        _ => unreachable!(),
+    };
+    format!("{mne} r{rd}, r{rs}")
+}
+
+fn thumb_op_hireg<C: Context, const Op: usize, const H1: bool, const H2: bool>(
+    cpu: &mut Cpu<C>,
+    ctx: &mut C,
+    instr: u16,
+) {
+    // If R15 is used as an operand, the value will be the address of the instruction + 4 with
+    // bit 0 cleared.
+
+    let rs = (H2 as usize * 8) + ((instr >> 3) & 0x7) as usize;
+    let rd = (H1 as usize * 8) + (instr & 0x7) as usize;
+
+    let op1 = cpu.regs.r[rd] + if rd == 15 { 2 } else { 0 };
+    let op2 = cpu.regs.r[rs] + if rs == 15 { 2 } else { 0 };
+
+    let res = match Op {
+        0 => alu::<C, 0b0100>(cpu, op1, op2, false),
+        1 => alu::<C, 0b1010>(cpu, op1, op2, true),
+        2 => alu::<C, 0b1101>(cpu, op1, op2, false),
+        _ => unreachable!(),
+    };
+
+    if let Some(res) = res {
+        if rd == 15 {
+            cpu.regs.r[rd] = res;
+        } else {
+            cpu.set_pc(res);
+        }
+    }
+}
+
+fn thumb_op_bx<C: Context, const H: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let rs = (H as usize * 8) + ((instr >> 3) & 0x7) as usize;
+    let new_pc = cpu.regs.r[rs] + if rs == 15 { 2 } else { 0 };
+
+    cpu.regs.state = new_pc & 1 != 0;
+
+    // Executing a BX PC in THUMB state from a non-word aligned address
+    // will result in unpredictable execution.
+    cpu.set_pc(new_pc & !1);
+}
+
+fn thumb_disasm_hireg(instr: u16, pc: u32) -> String {
+    let op = (instr >> 8) & 3;
+    let h1 = (instr >> 7) & 1;
+    let h2 = (instr >> 6) & 1;
+    let rs = h2 * 8 + ((instr >> 3) & 0x7);
+    let rd = h1 * 8 + (instr & 0x7);
+
+    let mne = match op {
+        0 => "add",
+        1 => "cmp",
+        2 => "mov",
+        3 => "bx",
+        _ => unreachable!(),
+    };
+
+    if mne != "bx" {
+        format!("{mne} r{rd}, r{rs}")
+    } else {
+        format!("{mne} r{rs}")
+    }
+}
+
+fn thumb_op_ld_pcrel<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let rd = ((instr >> 8) & 0x7) as usize;
+    let imm = (instr & 0xFF) * 4;
+
+    // The value of the PC will be 4 bytes greater than the address of this instruction,
+    // but bit 1 of the PC is forced to 0 to ensure it is word aligned.
+    let addr = cpu.regs.r[15].wrapping_add(imm as u32 + 2) & !3;
+    cpu.regs.r[rd] = u32::load(ctx, addr);
+}
+
+fn thumb_disasm_ld_pcrel(instr: u16, pc: u32) -> String {
+    let rd = (instr >> 8) & 0x7;
+    let imm = (instr & 0xFF) * 4;
+    format!("ldr r{rd}, [pc, #{imm}]")
+}
+
+fn thumb_op_ldst<C: Context, const L: bool, T: Data>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let ro = ((instr >> 6) & 3) as usize;
+    let rb = ((instr >> 3) & 3) as usize;
+    let rd = (instr & 3) as usize;
+
+    let addr = cpu.regs.r[rb].wrapping_add(cpu.regs.r[ro]);
+
+    if L {
+        cpu.regs.r[rd] = T::load(ctx, addr);
+    } else {
+        T::store(ctx, addr, cpu.regs.r[rd]);
+    }
+}
+
+fn thumb_disasm_ldst(instr: u16, pc: u32) -> String {
+    let ro = ((instr >> 6) & 3) as usize;
+    let rb = ((instr >> 3) & 3) as usize;
+    let rd = (instr & 3) as usize;
+
+    let mne = if (instr >> 9) & 1 == 0 {
+        let l = (instr >> 11) & 1 != 0;
+        let b = (instr >> 10) & 1 != 0;
+        match (l, b) {
+            (false, false) => "str",
+            (false, true) => "strb",
+            (true, false) => "ldr",
+            (true, true) => "ldrb",
+        }
+    } else {
+        let h = (instr >> 11) & 1 != 0;
+        let s = (instr >> 10) & 1 != 0;
+        match (s, h) {
+            (false, false) => "strh",
+            (false, true) => "ldrh",
+            (true, false) => "ldsb",
+            (true, true) => "ldsh",
+        }
+    };
+
+    format!("{mne} r{rd}, [r{rb}, r{ro}]")
+}
+
+fn thumb_op_ldst_ofs<C: Context, const L: bool, T: Data>(
+    cpu: &mut Cpu<C>,
+    ctx: &mut C,
+    instr: u16,
+) {
+    let ofs = ((instr >> 6) & 0x1F) as u32;
+    let rb = ((instr >> 3) & 3) as usize;
+    let rd = (instr & 0x7) as usize;
+
+    let addr = cpu.regs.r[rb].wrapping_add(ofs as u32 * size_of::<T>() as u32);
+    if L {
+        cpu.regs.r[rd] = T::load(ctx, addr);
+    } else {
+        T::store(ctx, addr, cpu.regs.r[rd]);
+    }
+}
+
+fn thumb_disasm_ldst_ofs(instr: u16, pc: u32) -> String {
+    let ofs = ((instr >> 6) & 0x1F) as u32;
+    let rb = ((instr >> 3) & 3) as usize;
+    let rd = (instr & 0x7) as usize;
+
+    let (mne, suf, size) = if (instr >> 13) == 0b011 {
+        let b = (instr >> 12) & 1 != 0;
+        let l = (instr >> 11) & 1 != 0;
+        let mne = if l { "ldr" } else { "str" };
+        let suf = if b { "b" } else { "" };
+        let size = if b { 1 } else { 4 };
+        (mne, suf, size)
+    } else {
+        let l = (instr >> 11) & 1 != 0;
+        (if l { "ldr" } else { "str" }, "h", 2)
+    };
+
+    let ofs = ofs * size;
+    format!("{mne}{suf} r{rd}, [r{rb}, #{ofs}]")
+}
+
+fn thumb_op_ldst_sprel<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let rd = ((instr >> 8) & 0x7) as usize;
+    let ofs = (instr & 0xFF) as u32 * 4;
+    let addr = cpu.regs.r[13].wrapping_add(ofs);
+    if L {
+        cpu.regs.r[rd] = u32::load(ctx, addr);
+    } else {
+        u32::store(ctx, addr, cpu.regs.r[rd]);
+    }
+}
+
+fn thumb_disasm_ldst_sprel(instr: u16, pc: u32) -> String {
+    let l = (instr >> 11) & 1 != 0;
+    let rd = ((instr >> 8) & 0x7) as usize;
+    let ofs = (instr & 0xFF) as u32 * 4;
+    let mne = if l { "ldr" } else { "str" };
+    format!("{mne} r{rd}, [sp, #{ofs}]")
+}
+
+fn thumb_op_load_addr<C: Context, const Sp: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let rd = ((instr >> 8) & 7) as usize;
+    let ofs = (instr & 0xFF) as u32 * 4;
+    let addr = if Sp {
+        cpu.regs.r[13].wrapping_add(ofs)
+    } else {
+        cpu.regs.r[15].wrapping_add(ofs + 2)
+    };
+    cpu.regs.r[rd] = addr;
+}
+
+fn thumb_disasm_load_addr(instr: u16, pc: u32) -> String {
+    let sp = (instr >> 11) & 1 != 0;
+    let rd = ((instr >> 8) & 7) as usize;
+    let ofs = (instr & 0xFF) as u32 * 4;
+    format!("add r{rd}, r{}, #{ofs}", if sp { 13 } else { 15 })
+}
+
+fn thumb_op_add_sp<C: Context, const Sign: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let ofs = (instr & 0x7F) as u32 * 4;
+    if !Sign {
+        cpu.regs.r[13] = cpu.regs.r[13].wrapping_add(ofs);
+    } else {
+        cpu.regs.r[13] = cpu.regs.r[13].wrapping_sub(ofs);
+    }
+}
+
+fn thumb_disasm_add_sp(instr: u16, pc: u32) -> String {
+    let sign = (instr >> 7) & 1 != 0;
+    let ofs = (instr & 0x7F) as u32 * 4;
+    let mne = if sign { "sub" } else { "add" };
+    let sign = if sign { "-" } else { "" };
+    format!("add sp, #{sign}{ofs}")
+}
+
+fn thumb_op_push_pop<C: Context, const L: bool, const R: bool>(
+    cpu: &mut Cpu<C>,
+    ctx: &mut C,
+    instr: u16,
+) {
+    let rlist = instr & 0xFF;
+    let mut addr = cpu.regs.r[13];
+    if !L {
+        for i in 0..8 {
+            if rlist & (1 << i) != 0 {
+                addr = addr.wrapping_sub(4);
+                u32::store(ctx, addr, cpu.regs.r[i]);
+            }
+        }
+        if R {
+            addr = addr.wrapping_sub(4);
+            u32::store(ctx, addr, cpu.regs.r[14]);
+        }
+    } else {
+        for i in 0..8 {
+            if rlist & (1 << i) != 0 {
+                cpu.regs.r[i] = u32::load(ctx, addr);
+                addr = addr.wrapping_add(4);
+            }
+        }
+        if R {
+            cpu.set_pc(u32::load(ctx, addr));
+            addr = addr.wrapping_add(4);
+        }
+    }
+    cpu.regs.r[13] = addr;
+}
+
+fn thumb_disasm_push_pop(instr: u16, pc: u32) -> String {
+    let l = (instr >> 11) & 1 != 0;
+    let r = (instr >> 8) & 1 != 0;
+    let mne = if l { "push" } else { "pop" };
+    let rlist = instr & 0xFF;
+    let pclr = if r { 1 << if l { 15 } else { 14 } } else { 0 };
+    format!("{mne} {}", fmt_reglist(rlist | pclr))
+}
+
+fn thumb_op_ldstm<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let rb = ((instr >> 8) & 0x7) as usize;
+    let rlist = instr & 0xFF;
+
+    let mut addr = cpu.regs.r[rb];
+    if !L {
+        for i in 0..8 {
+            if rlist & (1 << i) != 0 {
+                u32::store(ctx, addr, cpu.regs.r[i]);
+                addr = addr.wrapping_add(4);
+            }
+        }
+    } else {
+        // FIXME: rb in rlist?
+        for i in 0..8 {
+            if rlist & (1 << i) != 0 {
+                cpu.regs.r[i] = u32::load(ctx, addr);
+                addr = addr.wrapping_add(4);
+            }
+        }
+    }
+    cpu.regs.r[rb] = addr;
+}
+
+fn thumb_disasm_ldstm(instr: u16, pc: u32) -> String {
+    let l = (instr >> 11) & 1 != 0;
+    let rb = ((instr >> 8) & 0x7) as usize;
+    let mne = if l { "ldm" } else { "stm" };
+    let rlist = instr & 0xFF;
+    format!("{mne}ia r{rb}!, {}", fmt_reglist(rlist))
+}
+
+fn thumb_op_cond_branch<C: Context, const Cond: usize>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let cond = (instr >> 8) & 0xF;
+    if cpu.regs.check_cond(cond as u8) {
+        let offset = (instr as i8) as i32 * 2 + 2;
+        cpu.set_pc(cpu.regs.r[15].wrapping_add(offset as u32));
+    }
+}
+
+fn thumb_disasm_cond_branch(instr: u16, pc: u32) -> String {
+    let cond = (instr >> 8) & 0xF;
+    let offset = ((instr as i8) as i32 * 2 + 2) as u32;
+    let dest = pc.wrapping_add(offset);
+    format!("b{} #0x{dest:08X}", COND[cond as usize])
+}
+
+fn thumb_op_swi<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    cpu.exception(Exception::SoftwareInterrupt);
+}
+
+fn thumb_disasm_swi(instr: u16, pc: u32) -> String {
+    let value = instr & 0xFF;
+    format!("swi {value}")
+}
+
+fn thumb_op_b<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let offset = ((((instr as u32) << 21) as i32) >> 21) * 2 + 2;
+    let dest = cpu.regs.r[15].wrapping_add(offset as u32);
+    cpu.set_pc(dest);
+}
+
+fn thumb_disasm_b(instr: u16, pc: u32) -> String {
+    let offset = ((((instr as u32) << 21) as i32) >> 21) * 2 + 2;
+    let dest = pc.wrapping_add(offset as u32);
+    format!("b 0x{dest:08X}")
+}
+
+fn thumb_op_bl<C: Context, const H: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    let offset = (((instr as u32) << 21) as i32) >> 21;
+    if !H {
+        let lr = cpu.regs.r[15]
+            .wrapping_add(2)
+            .wrapping_add((offset << 12) as u32);
+        cpu.regs.r[14] = lr;
+    } else {
+        let ret_addr = cpu.regs.r[15];
+        let new_pc = cpu.regs.r[14].wrapping_add((offset * 2) as u32);
+        cpu.set_pc(new_pc);
+        cpu.regs.r[14] = ret_addr | 1;
+    }
+}
+
+fn thumb_disasm_bl(instr: u16, pc: u32) -> String {
+    let h = (instr >> 11) & 1;
+    let offset = instr & 0x7FF;
+    if h == 0 {
+        format!("bl1 {:03X}xxx", offset)
+    } else {
+        format!("bl2 xxx{:03X}", offset * 2)
+    }
+}
+
+fn thumb_disasm_invalid(_instr: u16, _pc: u32) -> String {
+    "invalid".to_string()
 }
