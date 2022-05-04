@@ -836,7 +836,7 @@ fn build_thumb_table<C: Context>() -> ([ThumbOp<C>; 0x400], [ThumbDisasm; 0x400]
         } else if (ix >> 5) == 0b01001 {
             (thumb_op_ld_pcrel, thumb_disasm_ld_pcrel)
         } else if (ix >> 6) == 0b0101 {
-            let op = match ix & 0b111 {
+            let op = match (ix >> 3) & 0b111 {
                 0b000 => thumb_op_ldst::<C, false, u32>,
                 0b010 => thumb_op_ldst::<C, false, u8>,
                 0b100 => thumb_op_ldst::<C, true, u32>,
@@ -1230,8 +1230,8 @@ fn arm_op_alu<C: Context, const I: bool, const S: bool, const O: u8>(
     _ctx: &mut C,
     instr: u32,
 ) {
-    let rn = ((instr >> 16) & 0xf) as usize;
-    let rd = ((instr >> 12) & 0xf) as usize;
+    let rn = ((instr >> 16) & 0xF) as usize;
+    let rd = ((instr >> 12) & 0xF) as usize;
 
     let change_flag = S && rd != 15;
 
@@ -1257,7 +1257,7 @@ fn arm_op_alu<C: Context, const I: bool, const S: bool, const O: u8>(
 
 fn arm_op_mrs<C: Context, const S: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
     assert_eq!(instr & 0x0FBF0FFF, 0x010F0000);
-    let rd = ((instr >> 12) & 0xf) as usize;
+    let rd = ((instr >> 12) & 0xF) as usize;
     assert_ne!(rd, 15);
     if !S {
         cpu.regs.r[rd] = cpu.regs.spsr;
@@ -1301,10 +1301,10 @@ fn arm_op_mul<C: Context, const A: bool, const S: bool>(
 ) {
     // TODO: cycles
 
-    let rd = ((instr >> 16) & 0xf) as usize;
-    let rn = ((instr >> 12) & 0xf) as usize;
-    let rs = ((instr >> 8) & 0xf) as usize;
-    let rm = (instr & 0xf) as usize;
+    let rd = ((instr >> 16) & 0xF) as usize;
+    let rn = ((instr >> 12) & 0xF) as usize;
+    let rs = ((instr >> 8) & 0xF) as usize;
+    let rm = (instr & 0xF) as usize;
 
     // The destination register Rd must not be the same as the operand register Rm.
     // R15 must not be used as an operand or as the destination register.
@@ -1336,10 +1336,10 @@ fn arm_op_mull<C: Context, const U: bool, const A: bool, const S: bool>(
     _ctx: &mut C,
     instr: u32,
 ) {
-    let rdhi = ((instr >> 16) & 0xf) as usize;
-    let rdlo = ((instr >> 12) & 0xf) as usize;
-    let rs = ((instr >> 8) & 0xf) as usize;
-    let rm = (instr & 0xf) as usize;
+    let rdhi = ((instr >> 16) & 0xF) as usize;
+    let rdlo = ((instr >> 12) & 0xF) as usize;
+    let rs = ((instr >> 8) & 0xF) as usize;
+    let rm = (instr & 0xF) as usize;
 
     // R15 must not be used as an operand or as a destination register.
     // RdHi, RdLo, and Rm must all specify different registers.
@@ -1450,8 +1450,8 @@ fn arm_op_ldst<
 ) {
     // TODO: non-previllege mode access
 
-    let rn = ((instr >> 16) & 0xf) as usize;
-    let rd = ((instr >> 12) & 0xf) as usize;
+    let rn = ((instr >> 16) & 0xF) as usize;
+    let rd = ((instr >> 12) & 0xF) as usize;
 
     // TODO: check
     // * R15 must not be specified as the register offset (Rm).
@@ -1512,14 +1512,14 @@ fn arm_op_ldsth<
     // * LDR: 1S + 1N + 1I (rd=PC, 2S + 2N + 1I)
     // * STR: 2N
 
-    let rn = ((instr >> 16) & 0xf) as usize;
-    let rd = ((instr >> 12) & 0xf) as usize;
+    let rn = ((instr >> 16) & 0xF) as usize;
+    let rd = ((instr >> 12) & 0xF) as usize;
 
     let base = cpu.regs.r[rn];
 
     let offset = if !I {
         // R15 must not be specified as the register offset (Rm).
-        let rm = (instr & 0xf) as usize;
+        let rm = (instr & 0xF) as usize;
         assert_ne!(rm, 15);
         cpu.regs.r[rm]
     } else {
@@ -1565,7 +1565,7 @@ fn arm_op_ldstm<
     // LDM: nS + 1N + 1I cycles (LDM PC: (n+1)S + 2N + 1I)
     // STM: (n-1)S + 2N cycles
 
-    let rn = ((instr >> 16) & 0xf) as usize;
+    let rn = ((instr >> 16) & 0xF) as usize;
 
     // R15 should not be used as the base register in any LDM or STM instruction.
     assert_ne!(rn, 15);
@@ -1640,9 +1640,9 @@ fn arm_op_ldstm<
 }
 
 fn arm_op_swp<C: Context, const B: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u32) {
-    let rn = ((instr >> 16) & 0xf) as usize;
-    let rd = ((instr >> 12) & 0xf) as usize;
-    let rm = (instr & 0xf) as usize;
+    let rn = ((instr >> 16) & 0xF) as usize;
+    let rd = ((instr >> 12) & 0xF) as usize;
+    let rm = (instr & 0xF) as usize;
 
     // Do not use R15 as an operand (Rd, Rn or Rs) in a SWP instruction.
     assert!(rd != 15);
@@ -2055,7 +2055,7 @@ fn arm_disasm_cdp(instr: u32, _pc: u32) -> String {
     let crn = (instr >> 16) & 0xF;
     let crd = (instr >> 12) & 0xF;
     let cp_num = (instr >> 8) & 0xF;
-    let cp = (instr >> 5) & 0x7;
+    let cp = (instr >> 5) & 7;
     let crm = instr & 0xF;
 
     let expr2 = if cp == 0 {
@@ -2098,12 +2098,12 @@ fn arm_disasm_ldstc(instr: u32, _pc: u32) -> String {
 
 fn arm_disasm_mrc_mcr(instr: u32, _pc: u32) -> String {
     let cond = disasm_cond(instr);
-    let cp_opc = (instr >> 21) & 0x7;
+    let cp_opc = (instr >> 21) & 7;
     let ld = (instr >> 20) & 1;
     let crn = (instr >> 16) & 0xF;
     let rd = (instr >> 12) & 0xF;
     let cp_num = (instr >> 8) & 0xF;
-    let cp = (instr >> 5) & 0x7;
+    let cp = (instr >> 5) & 7;
     let crm = instr & 0xF;
 
     let mne = if ld == 0 { "mcr" } else { "mrc" };
@@ -2157,17 +2157,17 @@ fn fmt_reglist(reglist: u16) -> String {
     ret
 }
 
-fn thumb_op_shift<C: Context, const Op: u32>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+fn thumb_op_shift<C: Context, const OP: u32>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
     let offset = (instr >> 6) & 0x1F;
-    let rs = ((instr >> 3) & 0x7) as usize;
-    let rd = (instr & 0x7) as usize;
+    let rs = ((instr >> 3) & 7) as usize;
+    let rd = (instr & 7) as usize;
 
     // FIXME: is this correct?
-    let (res, carry) = if Op == 0 && offset == 0 {
+    let (res, carry) = if OP == 0 && offset == 0 {
         (cpu.regs.r[rs], cpu.regs.c_flag)
     } else {
         let offset = if offset == 0 { 32 } else { offset };
-        calc_sft(Op, cpu.regs.r[rs], offset as u8)
+        calc_sft(OP, cpu.regs.r[rs], offset as u8)
     };
 
     cpu.regs.c_flag = carry;
@@ -2175,11 +2175,11 @@ fn thumb_op_shift<C: Context, const Op: u32>(cpu: &mut Cpu<C>, ctx: &mut C, inst
     cpu.regs.r[rd] = res;
 }
 
-fn thumb_disasm_shift(instr: u16, pc: u32) -> String {
+fn thumb_disasm_shift(instr: u16, _pc: u32) -> String {
     let op = (instr >> 11) & 3;
     let offset = (instr >> 6) & 0x1F;
-    let rs = (instr >> 3) & 0x7;
-    let rd = instr & 0x7;
+    let rs = (instr >> 3) & 7;
+    let rd = instr & 7;
 
     let mne = match op {
         0 => "lsl",
@@ -2190,23 +2190,23 @@ fn thumb_disasm_shift(instr: u16, pc: u32) -> String {
     format!("{mne} r{rd}, r{rs}, #{offset}")
 }
 
-fn thumb_op_add_sub<C: Context, const I: bool, const Op: bool>(
+fn thumb_op_add_sub<C: Context, const I: bool, const OP: bool>(
     cpu: &mut Cpu<C>,
-    ctx: &mut C,
+    _ctx: &mut C,
     instr: u16,
 ) {
-    let rs = ((instr >> 3) & 0x7) as usize;
-    let rd = (instr & 0x7) as usize;
+    let rs = ((instr >> 3) & 7) as usize;
+    let rd = (instr & 7) as usize;
 
     let op1 = cpu.regs.r[rs];
     let op2 = if !I {
-        let rn = ((instr >> 6) & 0x7) as usize;
+        let rn = ((instr >> 6) & 7) as usize;
         cpu.regs.r[rn]
     } else {
         ((instr >> 6) & 7) as u32
     };
 
-    let res = if !Op {
+    let res = if !OP {
         alu::<C, 0b0100>(cpu, op1, op2, true)
     } else {
         alu::<C, 0b0010>(cpu, op1, op2, true)
@@ -2215,12 +2215,12 @@ fn thumb_op_add_sub<C: Context, const I: bool, const Op: bool>(
     cpu.regs.r[rd] = res.unwrap();
 }
 
-fn thumb_disasm_add_sub(instr: u16, pc: u32) -> String {
+fn thumb_disasm_add_sub(instr: u16, _pc: u32) -> String {
     let imm = (instr >> 10) & 1 != 0;
     let op = (instr >> 9) & 1;
-    let rs = (instr >> 3) & 0x7;
-    let rd = instr & 0x7;
-    let mne = if (instr >> 9) & 1 == 0 { "add" } else { "sub" };
+    let rs = (instr >> 3) & 7;
+    let rd = instr & 7;
+    let mne = if op == 0 { "add" } else { "sub" };
 
     if imm {
         let ofs = (instr >> 6) & 7;
@@ -2231,11 +2231,11 @@ fn thumb_disasm_add_sub(instr: u16, pc: u32) -> String {
     }
 }
 
-fn thumb_op_alu_imm8<C: Context, const Op: usize>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
-    let rd = ((instr >> 8) & 0x7) as usize;
+fn thumb_op_alu_imm8<C: Context, const OP: usize>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+    let rd = ((instr >> 8) & 7) as usize;
     let op1 = cpu.regs.r[rd];
     let op2 = (instr & 0xFF) as u32;
-    let res = match Op {
+    let res = match OP {
         0 => alu::<C, 0b1101>(cpu, op1, op2, true),
         1 => alu::<C, 0b1010>(cpu, op1, op2, true),
         2 => alu::<C, 0b0100>(cpu, op1, op2, true),
@@ -2247,9 +2247,9 @@ fn thumb_op_alu_imm8<C: Context, const Op: usize>(cpu: &mut Cpu<C>, ctx: &mut C,
     }
 }
 
-fn thumb_disasm_alu_imm8(instr: u16, pc: u32) -> String {
+fn thumb_disasm_alu_imm8(instr: u16, _pc: u32) -> String {
     let op = (instr >> 11) & 3;
-    let rd = (instr >> 8) & 0x7;
+    let rd = (instr >> 8) & 7;
     let ofs = instr & 0xFF;
     let mne = match op {
         0 => "mov",
@@ -2261,14 +2261,14 @@ fn thumb_disasm_alu_imm8(instr: u16, pc: u32) -> String {
     format!("{mne} r{rd}, #{ofs}")
 }
 
-fn thumb_op_alu<C: Context, const Op: usize>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
-    let rs = ((instr >> 3) & 0x7) as usize;
-    let rd = (instr & 0x7) as usize;
+fn thumb_op_alu<C: Context, const OP: usize>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+    let rs = ((instr >> 3) & 7) as usize;
+    let rd = (instr & 7) as usize;
 
     let op1 = cpu.regs.r[rd];
     let op2 = cpu.regs.r[rs];
 
-    let res = match Op {
+    let res = match OP {
         0b0000 => alu::<C, 0b0000>(cpu, op1, op2, true),
         0b0001 => alu::<C, 0b0001>(cpu, op1, op2, true),
         0b0010 => {
@@ -2313,10 +2313,10 @@ fn thumb_op_alu<C: Context, const Op: usize>(cpu: &mut Cpu<C>, ctx: &mut C, inst
     }
 }
 
-fn thumb_disasm_alu(instr: u16, pc: u32) -> String {
+fn thumb_disasm_alu(instr: u16, _pc: u32) -> String {
     let op = (instr >> 6) & 0x1F;
-    let rs = (instr >> 3) & 0x7;
-    let rd = instr & 0x7;
+    let rs = (instr >> 3) & 7;
+    let rd = instr & 7;
     let mne = match op {
         0 => "and",
         1 => "eor",
@@ -2339,21 +2339,21 @@ fn thumb_disasm_alu(instr: u16, pc: u32) -> String {
     format!("{mne} r{rd}, r{rs}")
 }
 
-fn thumb_op_hireg<C: Context, const Op: usize, const H1: bool, const H2: bool>(
+fn thumb_op_hireg<C: Context, const OP: usize, const H1: bool, const H2: bool>(
     cpu: &mut Cpu<C>,
-    ctx: &mut C,
+    _ctx: &mut C,
     instr: u16,
 ) {
     // If R15 is used as an operand, the value will be the address of the instruction + 4 with
     // bit 0 cleared.
 
-    let rs = (H2 as usize * 8) + ((instr >> 3) & 0x7) as usize;
-    let rd = (H1 as usize * 8) + (instr & 0x7) as usize;
+    let rs = (H2 as usize * 8) + ((instr >> 3) & 7) as usize;
+    let rd = (H1 as usize * 8) + (instr & 7) as usize;
 
     let op1 = cpu.regs.r[rd] + if rd == 15 { 2 } else { 0 };
     let op2 = cpu.regs.r[rs] + if rs == 15 { 2 } else { 0 };
 
-    let res = match Op {
+    let res = match OP {
         0 => alu::<C, 0b0100>(cpu, op1, op2, false),
         1 => alu::<C, 0b1010>(cpu, op1, op2, true),
         2 => alu::<C, 0b1101>(cpu, op1, op2, false),
@@ -2369,8 +2369,8 @@ fn thumb_op_hireg<C: Context, const Op: usize, const H1: bool, const H2: bool>(
     }
 }
 
-fn thumb_op_bx<C: Context, const H: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
-    let rs = (H as usize * 8) + ((instr >> 3) & 0x7) as usize;
+fn thumb_op_bx<C: Context, const H: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+    let rs = (H as usize * 8) + ((instr >> 3) & 7) as usize;
     let new_pc = cpu.regs.r[rs] + if rs == 15 { 2 } else { 0 };
 
     cpu.regs.state = new_pc & 1 != 0;
@@ -2380,12 +2380,12 @@ fn thumb_op_bx<C: Context, const H: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: 
     cpu.set_pc(new_pc & !1);
 }
 
-fn thumb_disasm_hireg(instr: u16, pc: u32) -> String {
+fn thumb_disasm_hireg(instr: u16, _pc: u32) -> String {
     let op = (instr >> 8) & 3;
     let h1 = (instr >> 7) & 1;
     let h2 = (instr >> 6) & 1;
-    let rs = h2 * 8 + ((instr >> 3) & 0x7);
-    let rd = h1 * 8 + (instr & 0x7);
+    let rs = h2 * 8 + ((instr >> 3) & 7);
+    let rd = h1 * 8 + (instr & 7);
 
     let mne = match op {
         0 => "add",
@@ -2403,7 +2403,7 @@ fn thumb_disasm_hireg(instr: u16, pc: u32) -> String {
 }
 
 fn thumb_op_ld_pcrel<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
-    let rd = ((instr >> 8) & 0x7) as usize;
+    let rd = ((instr >> 8) & 7) as usize;
     let imm = (instr & 0xFF) * 4;
 
     // The value of the PC will be 4 bytes greater than the address of this instruction,
@@ -2412,16 +2412,16 @@ fn thumb_op_ld_pcrel<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
     cpu.regs.r[rd] = u32::load(ctx, addr);
 }
 
-fn thumb_disasm_ld_pcrel(instr: u16, pc: u32) -> String {
-    let rd = (instr >> 8) & 0x7;
+fn thumb_disasm_ld_pcrel(instr: u16, _pc: u32) -> String {
+    let rd = (instr >> 8) & 7;
     let imm = (instr & 0xFF) * 4;
     format!("ldr r{rd}, [pc, #{imm}]")
 }
 
 fn thumb_op_ldst<C: Context, const L: bool, T: Data>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
-    let ro = ((instr >> 6) & 3) as usize;
-    let rb = ((instr >> 3) & 3) as usize;
-    let rd = (instr & 3) as usize;
+    let ro = ((instr >> 6) & 7) as usize;
+    let rb = ((instr >> 3) & 7) as usize;
+    let rd = (instr & 7) as usize;
 
     let addr = cpu.regs.r[rb].wrapping_add(cpu.regs.r[ro]);
 
@@ -2432,10 +2432,10 @@ fn thumb_op_ldst<C: Context, const L: bool, T: Data>(cpu: &mut Cpu<C>, ctx: &mut
     }
 }
 
-fn thumb_disasm_ldst(instr: u16, pc: u32) -> String {
-    let ro = ((instr >> 6) & 3) as usize;
-    let rb = ((instr >> 3) & 3) as usize;
-    let rd = (instr & 3) as usize;
+fn thumb_disasm_ldst(instr: u16, _pc: u32) -> String {
+    let ro = ((instr >> 6) & 7) as usize;
+    let rb = ((instr >> 3) & 7) as usize;
+    let rd = (instr & 7) as usize;
 
     let mne = if (instr >> 9) & 1 == 0 {
         let l = (instr >> 11) & 1 != 0;
@@ -2466,8 +2466,8 @@ fn thumb_op_ldst_ofs<C: Context, const L: bool, T: Data>(
     instr: u16,
 ) {
     let ofs = ((instr >> 6) & 0x1F) as u32;
-    let rb = ((instr >> 3) & 3) as usize;
-    let rd = (instr & 0x7) as usize;
+    let rb = ((instr >> 3) & 7) as usize;
+    let rd = (instr & 7) as usize;
 
     let addr = cpu.regs.r[rb].wrapping_add(ofs as u32 * size_of::<T>() as u32);
     if L {
@@ -2477,10 +2477,10 @@ fn thumb_op_ldst_ofs<C: Context, const L: bool, T: Data>(
     }
 }
 
-fn thumb_disasm_ldst_ofs(instr: u16, pc: u32) -> String {
+fn thumb_disasm_ldst_ofs(instr: u16, _pc: u32) -> String {
     let ofs = ((instr >> 6) & 0x1F) as u32;
-    let rb = ((instr >> 3) & 3) as usize;
-    let rd = (instr & 0x7) as usize;
+    let rb = ((instr >> 3) & 7) as usize;
+    let rd = (instr & 7) as usize;
 
     let (mne, suf, size) = if (instr >> 13) == 0b011 {
         let b = (instr >> 12) & 1 != 0;
@@ -2499,7 +2499,7 @@ fn thumb_disasm_ldst_ofs(instr: u16, pc: u32) -> String {
 }
 
 fn thumb_op_ldst_sprel<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
-    let rd = ((instr >> 8) & 0x7) as usize;
+    let rd = ((instr >> 8) & 7) as usize;
     let ofs = (instr & 0xFF) as u32 * 4;
     let addr = cpu.regs.r[13].wrapping_add(ofs);
     if L {
@@ -2509,18 +2509,18 @@ fn thumb_op_ldst_sprel<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C,
     }
 }
 
-fn thumb_disasm_ldst_sprel(instr: u16, pc: u32) -> String {
+fn thumb_disasm_ldst_sprel(instr: u16, _pc: u32) -> String {
     let l = (instr >> 11) & 1 != 0;
-    let rd = ((instr >> 8) & 0x7) as usize;
+    let rd = ((instr >> 8) & 7) as usize;
     let ofs = (instr & 0xFF) as u32 * 4;
     let mne = if l { "ldr" } else { "str" };
     format!("{mne} r{rd}, [sp, #{ofs}]")
 }
 
-fn thumb_op_load_addr<C: Context, const Sp: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+fn thumb_op_load_addr<C: Context, const SP: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
     let rd = ((instr >> 8) & 7) as usize;
     let ofs = (instr & 0xFF) as u32 * 4;
-    let addr = if Sp {
+    let addr = if SP {
         cpu.regs.r[13].wrapping_add(ofs)
     } else {
         cpu.regs.r[15].wrapping_add(ofs + 2)
@@ -2528,28 +2528,28 @@ fn thumb_op_load_addr<C: Context, const Sp: bool>(cpu: &mut Cpu<C>, ctx: &mut C,
     cpu.regs.r[rd] = addr;
 }
 
-fn thumb_disasm_load_addr(instr: u16, pc: u32) -> String {
+fn thumb_disasm_load_addr(instr: u16, _pc: u32) -> String {
     let sp = (instr >> 11) & 1 != 0;
     let rd = ((instr >> 8) & 7) as usize;
     let ofs = (instr & 0xFF) as u32 * 4;
     format!("add r{rd}, r{}, #{ofs}", if sp { 13 } else { 15 })
 }
 
-fn thumb_op_add_sp<C: Context, const Sign: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+fn thumb_op_add_sp<C: Context, const SIGN: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
     let ofs = (instr & 0x7F) as u32 * 4;
-    if !Sign {
+    if !SIGN {
         cpu.regs.r[13] = cpu.regs.r[13].wrapping_add(ofs);
     } else {
         cpu.regs.r[13] = cpu.regs.r[13].wrapping_sub(ofs);
     }
 }
 
-fn thumb_disasm_add_sp(instr: u16, pc: u32) -> String {
+fn thumb_disasm_add_sp(instr: u16, _pc: u32) -> String {
     let sign = (instr >> 7) & 1 != 0;
     let ofs = (instr & 0x7F) as u32 * 4;
     let mne = if sign { "sub" } else { "add" };
     let sign = if sign { "-" } else { "" };
-    format!("add sp, #{sign}{ofs}")
+    format!("{mne} sp, #{sign}{ofs}")
 }
 
 fn thumb_op_push_pop<C: Context, const L: bool, const R: bool>(
@@ -2585,7 +2585,7 @@ fn thumb_op_push_pop<C: Context, const L: bool, const R: bool>(
     cpu.regs.r[13] = addr;
 }
 
-fn thumb_disasm_push_pop(instr: u16, pc: u32) -> String {
+fn thumb_disasm_push_pop(instr: u16, _pc: u32) -> String {
     let l = (instr >> 11) & 1 != 0;
     let r = (instr >> 8) & 1 != 0;
     let mne = if l { "push" } else { "pop" };
@@ -2595,7 +2595,7 @@ fn thumb_disasm_push_pop(instr: u16, pc: u32) -> String {
 }
 
 fn thumb_op_ldstm<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
-    let rb = ((instr >> 8) & 0x7) as usize;
+    let rb = ((instr >> 8) & 7) as usize;
     let rlist = instr & 0xFF;
 
     let mut addr = cpu.regs.r[rb];
@@ -2618,17 +2618,16 @@ fn thumb_op_ldstm<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C, inst
     cpu.regs.r[rb] = addr;
 }
 
-fn thumb_disasm_ldstm(instr: u16, pc: u32) -> String {
+fn thumb_disasm_ldstm(instr: u16, _pc: u32) -> String {
     let l = (instr >> 11) & 1 != 0;
-    let rb = ((instr >> 8) & 0x7) as usize;
+    let rb = ((instr >> 8) & 7) as usize;
     let mne = if l { "ldm" } else { "stm" };
     let rlist = instr & 0xFF;
     format!("{mne}ia r{rb}!, {}", fmt_reglist(rlist))
 }
 
-fn thumb_op_cond_branch<C: Context, const Cond: usize>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
-    let cond = (instr >> 8) & 0xF;
-    if cpu.regs.check_cond(cond as u8) {
+fn thumb_op_cond_branch<C: Context, const COND: usize>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+    if cpu.regs.check_cond(COND as u8) {
         let offset = (instr as i8) as i32 * 2 + 2;
         cpu.set_pc(cpu.regs.r[15].wrapping_add(offset as u32));
     }
@@ -2636,21 +2635,21 @@ fn thumb_op_cond_branch<C: Context, const Cond: usize>(cpu: &mut Cpu<C>, ctx: &m
 
 fn thumb_disasm_cond_branch(instr: u16, pc: u32) -> String {
     let cond = (instr >> 8) & 0xF;
-    let offset = ((instr as i8) as i32 * 2 + 2) as u32;
+    let offset = ((instr as i8) as i32 * 2 + 4) as u32;
     let dest = pc.wrapping_add(offset);
     format!("b{} #0x{dest:08X}", COND[cond as usize])
 }
 
-fn thumb_op_swi<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+fn thumb_op_swi<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u16) {
     cpu.exception(Exception::SoftwareInterrupt);
 }
 
-fn thumb_disasm_swi(instr: u16, pc: u32) -> String {
+fn thumb_disasm_swi(instr: u16, _pc: u32) -> String {
     let value = instr & 0xFF;
     format!("swi {value}")
 }
 
-fn thumb_op_b<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+fn thumb_op_b<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
     let offset = ((((instr as u32) << 21) as i32) >> 21) * 2 + 2;
     let dest = cpu.regs.r[15].wrapping_add(offset as u32);
     cpu.set_pc(dest);
@@ -2662,7 +2661,7 @@ fn thumb_disasm_b(instr: u16, pc: u32) -> String {
     format!("b 0x{dest:08X}")
 }
 
-fn thumb_op_bl<C: Context, const H: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+fn thumb_op_bl<C: Context, const H: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
     let offset = (((instr as u32) << 21) as i32) >> 21;
     if !H {
         let lr = cpu.regs.r[15]
@@ -2677,7 +2676,7 @@ fn thumb_op_bl<C: Context, const H: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: 
     }
 }
 
-fn thumb_disasm_bl(instr: u16, pc: u32) -> String {
+fn thumb_disasm_bl(instr: u16, _pc: u32) -> String {
     let h = (instr >> 11) & 1;
     let offset = instr & 0x7FF;
     if h == 0 {
