@@ -2,7 +2,8 @@
 
 use std::{fmt::UpperHex, mem::size_of};
 
-use log::trace;
+use bitvec::prelude::*;
+use log::{trace, warn};
 
 use crate::{
     context::{Interrupt, Lcd},
@@ -13,26 +14,15 @@ trait_alias!(pub trait Context = Lcd + Interrupt);
 
 #[derive(Default)]
 pub struct Io {
-    interrupt_master_enable: bool,
-    interrupt_enable: [bool; 14],
-    post_boot: u8,
-}
+    game_pak_ram_wait_ctrl: u8,
+    game_pak_wait_ctrl: [u8; 3],
+    phi_terminal_output_ctrl: u8,
+    prefetch_buffer: bool,
+    game_pak_type: bool,
 
-enum InterruptSource {
-    VBlank = 0,
-    HBlank = 1,
-    VCount = 2,
-    Timer0 = 3,
-    Timer1 = 4,
-    Timer2 = 5,
-    Timer3 = 6,
-    Serial = 7,
-    Dma0 = 8,
-    Dma1 = 9,
-    Dma2 = 10,
-    Dma3 = 11,
-    Keypad = 12,
-    GamePak = 13,
+    post_boot: u8,
+
+    reg_width: Vec<usize>,
 }
 
 struct IoReg {
@@ -206,11 +196,11 @@ fn trace_rw<T: UpperHex, const READ: bool>(addr: u32, data: T) {
         return;
     }
 
-    let size = size_of::<T>();
+    let size = size_of::<T>() * 8;
 
-    let data = if size == 1 {
+    let data = if size == 8 {
         format!("{data:02X}")
-    } else if size == 2 {
+    } else if size == 16 {
         format!("{data:04X}")
     } else {
         format!("{data:08X}")
@@ -229,7 +219,44 @@ fn trace_rw<T: UpperHex, const READ: bool>(addr: u32, data: T) {
 
 impl Io {
     pub fn new() -> Self {
-        Io::default()
+        let mut reg_width = vec![0; 0x800];
+
+        for info in IO_REGS.iter() {
+            let addr = info.addr & 0x3FF;
+            let width = info.width;
+            assert_eq!(addr & (width - 1) as u32, 0);
+
+            for ofs in 0..width {
+                reg_width[addr as usize + ofs] = width;
+            }
+        }
+
+        Io {
+            reg_width,
+            ..Default::default()
+        }
+    }
+
+    pub fn game_pak_ram_wait_cycle(&self) -> u64 {
+        const TBL: [u64; 4] = [4, 3, 2, 8];
+        TBL[self.game_pak_ram_wait_ctrl as usize]
+    }
+
+    pub fn game_pak_wait_cycle(&self, ix: usize, first: bool) -> u64 {
+        const FIRST: [u64; 8] = [4, 3, 2, 8, 4, 3, 2, 8];
+        const SECOND: [[u64; 8]; 3] = [
+            [2, 2, 2, 2, 1, 1, 1, 1],
+            [4, 4, 4, 4, 1, 1, 1, 1],
+            [8, 8, 8, 8, 1, 1, 1, 1],
+        ];
+
+        let ctrl = self.game_pak_wait_ctrl[ix] as usize;
+
+        if first {
+            FIRST[ctrl]
+        } else {
+            SECOND[ix][ctrl]
+        }
     }
 
     pub fn read8(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
@@ -275,13 +302,27 @@ impl Io {
     }
 
     pub fn write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8) {
+        let width = self.reg_width[addr as usize];
+
+        if width == 0 {
+            warn!("Invalid register write: 0x{addr:03X} = 0x{data:02X}");
+            return;
+        }
+        if width == 2 {
+            warn!("Write 8bit data to 16bit register");
+            self.write16(ctx, addr, data as u16);
+            return;
+        }
+        if width == 4 {
+            warn!("Write 8bit data to 32bit register");
+            self.write32(ctx, addr, data as u32);
+            return;
+        }
+
         trace_rw::<u8, false>(addr, data);
 
         match addr {
             0x000..=0x056 => ctx.lcd_write8(addr, data),
-
-            // Interrupt Master Enable
-            0x208 => self.interrupt_master_enable = (data & 1) != 0,
 
             // POSTFLG
             0x300 => self.post_boot = data,
@@ -294,10 +335,47 @@ impl Io {
     }
 
     pub fn write16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
+        let width = self.reg_width[addr as usize];
+
+        if width == 0 {
+            warn!("Invalid register write: 0x{addr:03X} = 0x{data:04X}");
+            return;
+        }
+        if width == 1 {
+            for i in 0..2 {
+                self.write8(ctx, addr + i, (data >> (i * 8)) as u8);
+            }
+            return;
+        }
+        if width == 4 {
+            warn!("Write 16bit data to 32bit register");
+            self.write32(ctx, addr, data as u32);
+            return;
+        }
+
         trace_rw::<u16, false>(addr, data);
 
         match addr {
             0x000..=0x056 => ctx.lcd_write16(addr, data),
+
+            0x200 => ctx.interrupt_mut().set_enable(data & 0x3FFF),
+            0x202 => ctx.interrupt_mut().reset_request(data & 0x3FFF),
+
+            // Game Pak Memory Wait Control
+            0x204 => {
+                let v = data.view_bits::<Lsb0>();
+                self.game_pak_ram_wait_ctrl = v[0..=1].load();
+                self.game_pak_wait_ctrl[0] = v[2..=4].load();
+                self.game_pak_wait_ctrl[1] = v[5..=7].load();
+                self.game_pak_wait_ctrl[2] = v[8..=10].load();
+                self.phi_terminal_output_ctrl = v[11..=12].load();
+                self.prefetch_buffer = v[14];
+                self.game_pak_type = v[15];
+            }
+
+            0x208 => ctx.interrupt_mut().set_master_enable((data & 1) != 0),
+
+            0x206 | 0x20A => {}
 
             _ => todo!(
                 "IO write16: 0x{addr:03X} ({}) = 0x{data:04X}",
@@ -307,6 +385,25 @@ impl Io {
     }
 
     pub fn write32(&mut self, ctx: &mut impl Context, addr: u32, data: u32) {
+        let width = self.reg_width[addr as usize];
+
+        if width == 0 {
+            warn!("Invalid register write: 0x{addr:03X} = 0x{data:08X}");
+            return;
+        }
+        if width == 1 {
+            for i in 0..4 {
+                self.write8(ctx, addr + i, (data >> (i * 8)) as u8);
+            }
+            return;
+        }
+        if width == 2 {
+            for i in 0..2 {
+                self.write16(ctx, addr + i * 2, (data >> (i * 16)) as u16);
+            }
+            return;
+        }
+
         trace_rw::<u32, false>(addr, data);
 
         match addr {

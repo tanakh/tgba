@@ -271,12 +271,12 @@ impl<C: Context> Cpu<C> {
     }
 
     pub fn exec_one(&mut self, ctx: &mut C) {
-        if !self.regs.fiq_disable && ctx.fiq() {
+        if !self.regs.fiq_disable && ctx.interrupt().fiq() {
             self.exception(Exception::FIQ);
             return;
         }
 
-        if !self.regs.irq_disable && ctx.irq() {
+        if !self.regs.irq_disable && ctx.interrupt().irq() {
             self.exception(Exception::IRQ);
             return;
         }
@@ -1117,7 +1117,7 @@ fn sub_with_flag(a: u32, b: u32, c: bool) -> (u32, bool, bool) {
     let (tmp, overflow1) = (a as i32).overflowing_sub(b as i32);
     let (_, overflow2) = tmp.overflowing_sub(1 - c as i32);
 
-    (ret, !(carry1 || carry2), !(overflow1 || overflow2))
+    (ret, !(carry1 || carry2), overflow1 || overflow2)
 }
 
 fn alu<C: Context, const O: u8>(

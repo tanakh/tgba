@@ -1,4 +1,4 @@
-use crate::{bus, cpu, io, lcd, rom::Rom, sound};
+use crate::{bus, cpu, interrupt, io, lcd, rom, sound};
 
 pub trait Bus {
     fn read8(&mut self, addr: u32) -> u8;
@@ -41,10 +41,8 @@ pub trait Sound {
 }
 
 pub trait Interrupt {
-    fn irq(&self) -> bool;
-    fn set_irq(&mut self, irq: bool);
-    fn fiq(&self) -> bool;
-    fn set_fiq(&mut self, fiq: bool);
+    fn interrupt(&self) -> &interrupt::Interrupt;
+    fn interrupt_mut(&mut self) -> &mut interrupt::Interrupt;
 }
 
 pub struct Context {
@@ -69,17 +67,17 @@ pub struct Inner3 {
 }
 
 pub struct Inner4 {
-    irq: bool,
-    fiq: bool,
+    interrupt: interrupt::Interrupt,
 }
 
 impl Context {
-    pub fn new(bios: Vec<u8>, rom: Rom) -> Self {
+    pub fn new(bios: Vec<u8>, rom: rom::Rom) -> Self {
         let cpu = cpu::Cpu::new();
         let bus = bus::Bus::new(bios, rom);
         let io = io::Io::new();
         let lcd = lcd::Lcd::new();
         let sound = sound::Sound::new();
+        let interrupt = interrupt::Interrupt::new();
 
         Context {
             cpu,
@@ -90,10 +88,7 @@ impl Context {
                     inner: Inner3 {
                         lcd,
                         sound,
-                        inner: Inner4 {
-                            irq: false,
-                            fiq: false,
-                        },
+                        inner: Inner4 { interrupt },
                     },
                 },
             },
@@ -206,73 +201,37 @@ impl Sound for Inner3 {
 }
 
 impl Interrupt for Inner {
-    fn irq(&self) -> bool {
-        self.inner.irq()
+    fn interrupt(&self) -> &interrupt::Interrupt {
+        self.inner.interrupt()
     }
-
-    fn set_irq(&mut self, irq: bool) {
-        self.inner.set_irq(irq)
-    }
-
-    fn fiq(&self) -> bool {
-        self.inner.fiq()
-    }
-
-    fn set_fiq(&mut self, fiq: bool) {
-        self.inner.set_fiq(fiq)
+    fn interrupt_mut(&mut self) -> &mut interrupt::Interrupt {
+        self.inner.interrupt_mut()
     }
 }
 
 impl Interrupt for Inner2 {
-    fn irq(&self) -> bool {
-        self.inner.irq()
+    fn interrupt(&self) -> &interrupt::Interrupt {
+        self.inner.interrupt()
     }
-
-    fn set_irq(&mut self, irq: bool) {
-        self.inner.set_irq(irq)
-    }
-
-    fn fiq(&self) -> bool {
-        self.inner.fiq()
-    }
-
-    fn set_fiq(&mut self, fiq: bool) {
-        self.inner.set_fiq(fiq)
+    fn interrupt_mut(&mut self) -> &mut interrupt::Interrupt {
+        self.inner.interrupt_mut()
     }
 }
 
 impl Interrupt for Inner3 {
-    fn irq(&self) -> bool {
-        self.inner.irq()
+    fn interrupt(&self) -> &interrupt::Interrupt {
+        self.inner.interrupt()
     }
-
-    fn set_irq(&mut self, irq: bool) {
-        self.inner.set_irq(irq)
-    }
-
-    fn fiq(&self) -> bool {
-        self.inner.fiq()
-    }
-
-    fn set_fiq(&mut self, fiq: bool) {
-        self.inner.set_fiq(fiq)
+    fn interrupt_mut(&mut self) -> &mut interrupt::Interrupt {
+        self.inner.interrupt_mut()
     }
 }
 
 impl Interrupt for Inner4 {
-    fn irq(&self) -> bool {
-        self.irq
+    fn interrupt(&self) -> &interrupt::Interrupt {
+        &self.interrupt
     }
-
-    fn set_irq(&mut self, irq: bool) {
-        self.irq = irq
-    }
-
-    fn fiq(&self) -> bool {
-        self.fiq
-    }
-
-    fn set_fiq(&mut self, fiq: bool) {
-        self.fiq = fiq
+    fn interrupt_mut(&mut self) -> &mut interrupt::Interrupt {
+        &mut self.interrupt
     }
 }

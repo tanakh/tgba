@@ -40,7 +40,7 @@ impl Bus {
             }
             0x2 => self.ext_ram[(addr & 0x3FFFF) as usize],
             0x3 => self.ram[(addr & 0x7FFF) as usize],
-            0x4 => ctx.io_read8(addr & 0x3FF),
+            0x4 => ctx.io_read8(addr & 0xFFFF),
             0x5 => {
                 todo!("Palette RAM")
             }
@@ -79,7 +79,7 @@ impl Bus {
             }
             0x2 => read16(&self.ext_ram, (addr & 0x3FFFF) as usize),
             0x3 => read16(&self.ram, (addr & 0x7FFF) as usize),
-            0x4 => ctx.io_read16(addr & 0x3FF),
+            0x4 => ctx.io_read16(addr & 0xFFFF),
             0x5 => {
                 todo!("Palette RAM")
             }
@@ -118,7 +118,7 @@ impl Bus {
             }
             0x2 => read32(&self.ext_ram, (addr & 0x3FFFF) as usize),
             0x3 => read32(&self.ram, (addr & 0x7FFF) as usize),
-            0x4 => ctx.io_read32(addr & 0x3FF),
+            0x4 => ctx.io_read32(addr & 0xFFFF),
             0x5 => {
                 todo!("Palette RAM")
             }
@@ -154,7 +154,7 @@ impl Bus {
             }
             0x2 => self.ext_ram[(addr & 0x3FFFF) as usize] = data,
             0x3 => self.ram[(addr & 0x7FFF) as usize] = data,
-            0x4 => ctx.io_write8(addr & 0x3FF, data),
+            0x4 => ctx.io_write8(addr & 0xFFFF, data),
             0x5 => {
                 todo!("Palette RAM")
             }
@@ -189,7 +189,7 @@ impl Bus {
             }
             0x2 => write16(&mut self.ext_ram, (addr & 0x3FFFF) as usize, data),
             0x3 => write16(&mut self.ram, (addr & 0x7FFF) as usize, data),
-            0x4 => ctx.io_write16(addr & 0x3FF, data),
+            0x4 => ctx.io_write16(addr & 0xFFFF, data),
             0x5 => {
                 todo!("Palette RAM")
             }
@@ -228,7 +228,7 @@ impl Bus {
             }
             0x2 => write32(&mut self.ext_ram, (addr & 0x3FFFF) as usize, data),
             0x3 => write32(&mut self.ram, (addr & 0x7FFF) as usize, data),
-            0x4 => ctx.io_write32(addr & 0x3FF, data),
+            0x4 => ctx.io_write32(addr & 0xFFFF, data),
             0x5 => {
                 todo!("Palette RAM")
             }
