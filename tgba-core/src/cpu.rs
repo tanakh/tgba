@@ -886,7 +886,7 @@ fn build_thumb_table<C: Context>() -> ([ThumbOp<C>; 0x400], [ThumbDisasm; 0x400]
             };
             (op, thumb_disasm_add_sp)
         } else if (ix >> 2) & 0b11110110 == 0b10110100 {
-            let op = match (ix >> 2) & 0x1001 {
+            let op = match (ix >> 2) & 0b1001 {
                 0b0000 => thumb_op_push_pop::<C, false, false>,
                 0b0001 => thumb_op_push_pop::<C, false, true>,
                 0b1000 => thumb_op_push_pop::<C, true, false>,
@@ -2625,7 +2625,7 @@ fn block_trans<C: Context, const L: bool, const R: bool>(
 
     let mut addr = start;
     for i in 0..8 {
-        if rlist & (1 << i) != 0 {
+        if rlist & (1 << i) == 0 {
             continue;
         }
         if !L {
@@ -2656,7 +2656,7 @@ fn thumb_op_push_pop<C: Context, const L: bool, const R: bool>(
 fn thumb_disasm_push_pop(instr: u16, _pc: u32) -> String {
     let l = (instr >> 11) & 1 != 0;
     let r = (instr >> 8) & 1 != 0;
-    let mne = if l { "push" } else { "pop" };
+    let mne = if l { "pop" } else { "push" };
     let rlist = instr & 0xFF;
     let pclr = if r { 1 << if l { 15 } else { 14 } } else { 0 };
     format!("{mne} {}", fmt_reglist(rlist | pclr))
@@ -2706,7 +2706,7 @@ fn thumb_op_b<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
 }
 
 fn thumb_disasm_b(instr: u16, pc: u32) -> String {
-    let offset = ((((instr as u32) << 21) as i32) >> 21) * 2 + 2;
+    let offset = ((((instr as u32) << 21) as i32) >> 21) * 2 + 4;
     let dest = pc.wrapping_add(offset as u32);
     format!("b 0x{dest:08X}")
 }

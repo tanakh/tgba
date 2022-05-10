@@ -1,3 +1,5 @@
+use log::{info, warn};
+
 use crate::{context::Interrupt, util::trait_alias};
 
 pub struct Sound {}
@@ -10,26 +12,27 @@ impl Sound {
     }
 
     pub fn read8(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
-        todo!()
+        info!("Sound read8: 0x{addr:08X}");
+        0
     }
 
     pub fn read16(&mut self, ctx: &mut impl Context, addr: u32) -> u16 {
-        todo!()
-    }
+        match addr {
+            // SOUNDBIAS
+            0x088 => 0x0200,
 
-    pub fn read32(&mut self, ctx: &mut impl Context, addr: u32) -> u32 {
-        todo!()
+            _ => {
+                warn!("Sound read16: 0x{addr:08X}");
+                0
+            }
+        }
     }
 
     pub fn write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8) {
-        todo!()
+        info!("Sound write8: 0x{addr:08X} = 0x{data:02X}");
     }
 
     pub fn write16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
-        todo!()
-    }
-
-    pub fn write32(&mut self, ctx: &mut impl Context, addr: u32, data: u32) {
-        todo!()
+        info!("Sound write16: 0x{addr:08X} = 0x{data:04X}");
     }
 }

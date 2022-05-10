@@ -4,7 +4,6 @@ mod bus;
 mod context;
 mod cpu;
 mod interrupt;
-mod io;
 mod lcd;
 mod rom;
 mod sound;
