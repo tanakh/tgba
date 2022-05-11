@@ -5,7 +5,7 @@ use crate::{
     consts::{CLOCK_PER_DOT, SCREEN_HEIGHT, SCREEN_WIDTH, VISIBLE_HEIGHT, VISIBLE_WIDTH},
     context::{Interrupt, Timing},
     interrupt::InterruptKind,
-    util::trait_alias,
+    util::{pack, trait_alias},
 };
 
 #[derive(Default)]
@@ -24,13 +24,10 @@ pub struct Lcd {
     display_window: [bool; 2],
     display_obj_window: bool,
 
-    vblank_status: bool,
-    hblank_status: bool,
-    vcounter_status: bool,
     vblank_irq_enable: bool,
     hblank_irq_enable: bool,
     vcount_irq_enable: bool,
-    vcount_irq: u8,
+    vcount: u8,
 
     bg: [Bg; 4],
     window: [Window; 2],
@@ -149,7 +146,7 @@ impl Lcd {
 
             trace!("Frame:{}, Line:{:03}", self.frame, self.y);
 
-            if self.y as u32 == VISIBLE_HEIGHT {
+            if self.y == VISIBLE_HEIGHT {
                 // TODO: VBLANK
                 info!("Enter VBLANK: frame:{}", self.frame);
 
@@ -160,7 +157,7 @@ impl Lcd {
                 // TODO: render line
             }
 
-            if self.y == self.vcount_irq as u32 && self.vcount_irq_enable {
+            if self.y == self.vcount as u32 && self.vcount_irq_enable {
                 if self.vblank_irq_enable {
                     ctx.interrupt_mut().set_interrupt(InterruptKind::VCount);
                 }
@@ -173,8 +170,31 @@ impl Lcd {
         }
     }
 
+    fn vblank(&self) -> bool {
+        self.y >= VISIBLE_HEIGHT
+    }
+
+    fn hblank(&self) -> bool {
+        self.y < VISIBLE_HEIGHT && self.x >= VISIBLE_WIDTH
+    }
+
+    fn vcount_match(&self) -> bool {
+        self.y == self.vcount as u32
+    }
+
     pub fn read16(&mut self, ctx: &mut impl Context, addr: u32) -> u16 {
         match addr {
+            // DISPSTAT
+            0x004 => pack! {
+                0 => self.vblank(),
+                1 => self.hblank(),
+                2 => self.vcount_match(),
+                3 => self.vblank_irq_enable,
+                4 => self.hblank_irq_enable,
+                5 => self.vcount_irq_enable,
+                8..=15 => self.vcount,
+            },
+
             // VCOUNT
             0x006 => self.y as u16,
 
@@ -208,7 +228,7 @@ impl Lcd {
                 self.vblank_irq_enable = v[3];
                 self.hblank_irq_enable = v[4];
                 self.vcount_irq_enable = v[5];
-                self.vcount_irq = v[8..=15].load();
+                self.vcount = v[8..=15].load();
             }
 
             // VCOUNT

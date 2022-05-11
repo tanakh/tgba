@@ -593,6 +593,10 @@ impl Bus {
             }
             0x060..=0x0AF => ctx.sound_read8(addr),
 
+            // KEYINPUT
+            0x130 => self.key_input as u8,
+            0x131 => (self.key_input >> 8) as u8,
+
             // POSTFLG
             0x300 => self.post_boot,
             _ => todo!(
@@ -607,8 +611,9 @@ impl Bus {
             0x000..=0x05E => ctx.lcd_read16(addr),
             0x060..=0x0AE => ctx.sound_read16(addr),
 
-            // KEYINPUT
-            0x130 => self.key_input,
+            // JOY_RECV
+            0x150 => 0,
+            0x152 => 0,
 
             // IE
             0x200 => ctx.interrupt().enable(),
@@ -625,6 +630,12 @@ impl Bus {
                 14      => self.prefetch_buffer,
                 15      => self.game_pak_type,
             },
+
+            0x130 => {
+                let lo = self.io_read8(ctx, addr);
+                let hi = self.io_read8(ctx, addr + 1);
+                lo as u16 | ((hi as u16) << 8)
+            }
 
             _ => todo!(
                 "IO read16: 0x{addr:03X} ({})",

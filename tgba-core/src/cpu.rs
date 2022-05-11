@@ -278,9 +278,9 @@ impl<C: Context> Cpu<C> {
     }
 
     pub fn exec_one(&mut self, ctx: &mut C) {
-        if ctx.now() > 1604748 - 10 {
-            self.trace = true;
-        }
+        // if ctx.now() > 75758229 - 100 {
+        //     self.trace = true;
+        // }
 
         if !self.regs.fiq_disable && ctx.interrupt().fiq() {
             ctx.interrupt_mut().set_halt(false);
@@ -1485,7 +1485,9 @@ fn arm_op_mul<C: Context, const A: bool, const S: bool>(
     // The destination register Rd must not be the same as the operand register Rm.
     // R15 must not be used as an operand or as the destination register.
 
-    assert_ne!(rd, rm);
+    // Is this OK?
+    // assert_ne!(rd, rm);
+
     assert_ne!(rd, 15);
     assert_ne!(rn, 15);
     assert_ne!(rs, 15);
@@ -1513,8 +1515,8 @@ fn arm_disasm_mul(instr: u32, _pc: u32) -> String {
     let rn = (instr >> 12) & 0xF;
     let rs = (instr >> 8) & 0xF;
     let rm = instr & 0xF;
-    let a = (instr >> 25) & 1;
-    let s = (instr >> 24) & 1;
+    let a = (instr >> 21) & 1;
+    let s = (instr >> 20) & 1;
     let s = if s == 0 { "" } else { "s" };
 
     if a == 0 {
@@ -2116,7 +2118,8 @@ fn arm_disasm_swp(instr: u32, _pc: u32) -> String {
     format!("swp{cond}{b} r{rd}, r{rm}, [r{rn}]")
 }
 
-fn arm_op_swi<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
+fn arm_op_swi<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u32) {
+    info!("SWI: {instr:08X}, cycle: {}", ctx.now());
     cpu.exception(Exception::SoftwareInterrupt)
 }
 
@@ -2656,7 +2659,10 @@ fn thumb_op_load_addr<C: Context, const SP: bool>(cpu: &mut Cpu<C>, _ctx: &mut C
     let addr = if SP {
         cpu.regs.r[13].wrapping_add(ofs)
     } else {
-        cpu.regs.r[15].wrapping_add(ofs + 2)
+        // Where the PC is used as the source register (SP = 0), bit 1 of the PC is always read
+        // as 0. The value of the PC will be 4 bytes greater than the address of the instruction
+        // before bit 1 is forced to 0.
+        cpu.regs.r[15].wrapping_add(ofs + 2) & !3
     };
     cpu.regs.r[rd] = addr;
 }
@@ -2774,7 +2780,8 @@ fn thumb_disasm_cond_branch(instr: u16, pc: u32) -> String {
     format!("b{} #0x{dest:08X}", COND[cond as usize])
 }
 
-fn thumb_op_swi<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u16) {
+fn thumb_op_swi<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
+    info!("SWI: {:04X}, cycle: {}", instr, ctx.now());
     cpu.exception(Exception::SoftwareInterrupt);
 }
 
