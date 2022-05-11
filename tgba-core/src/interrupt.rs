@@ -1,11 +1,16 @@
+use log::info;
+
 #[derive(Default)]
 pub struct Interrupt {
     master_enable: bool,
     enable: u16,
     request: u16,
+    halt: bool,
+    stop: bool,
 }
 
-pub enum InterruptSource {
+#[derive(Debug)]
+pub enum InterruptKind {
     VBlank = 0,
     HBlank = 1,
     VCount = 2,
@@ -43,7 +48,7 @@ impl Interrupt {
         self.master_enable = enable;
     }
 
-    pub fn enable(&mut self) -> u16 {
+    pub fn enable(&self) -> u16 {
         self.enable
     }
 
@@ -59,7 +64,24 @@ impl Interrupt {
         self.request &= !request;
     }
 
-    pub fn set_interrupt(&mut self, source: InterruptSource) {
+    pub fn set_interrupt(&mut self, source: InterruptKind) {
+        info!("Set interrupt: {source:?}");
         self.request |= 1 << source as u16;
+    }
+
+    pub fn halt(&self) -> bool {
+        self.halt
+    }
+
+    pub fn set_halt(&mut self, halt: bool) {
+        self.halt = halt;
+    }
+
+    pub fn stop(&self) -> bool {
+        self.stop
+    }
+
+    pub fn set_stop(&mut self, stop: bool) {
+        self.stop = stop;
     }
 }

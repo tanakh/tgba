@@ -4,12 +4,12 @@ use bitvec::prelude::*;
 use log::{info, trace, warn};
 
 use crate::{
-    context::{Interrupt, Lcd, Sound},
+    context::{Interrupt, Lcd, Sound, Timing},
     rom::Rom,
     util::{pack, trait_alias},
 };
 
-trait_alias!(pub trait Context = Lcd + Sound + Interrupt);
+trait_alias!(pub trait Context = Lcd + Sound + Timing + Interrupt);
 
 pub struct Bus {
     bios: Vec<u8>,
@@ -20,6 +20,7 @@ pub struct Bus {
     dma: [Dma; 4],
     timer: [Timer; 4],
 
+    key_input: u16,
     key_interrupt_spec: u16,
     key_interrupt_enable: bool,
     key_interrupt_cond: bool, // 0: or, 1: and
@@ -34,8 +35,83 @@ pub struct Bus {
 
     post_boot: u8,
 
+    wait_cycles: WaitCycles,
+
     reg_width_r: Vec<usize>,
     reg_width_w: Vec<usize>,
+}
+
+struct WaitCycles {
+    gamepak_rom_1st_8: [u64; 3],
+    gamepak_rom_1st_16: [u64; 3],
+    gamepak_rom_1st_32: [u64; 3],
+    gamepak_rom_2nd_8: [u64; 3],
+    gamepak_rom_2nd_16: [u64; 3],
+    gamepak_rom_2nd_32: [u64; 3],
+    gamepak_ram_8: u64,
+    gamepak_ram_16: u64,
+    gamepak_ram_32: u64,
+}
+
+fn game_pak_ram_wait_cycle(ctrl: usize) -> u64 {
+    const TBL: [u64; 4] = [4, 3, 2, 8];
+    TBL[ctrl]
+}
+
+fn game_pak_rom_wait_cycle(ix: usize, ctrl: usize, first: bool) -> u64 {
+    const FIRST: [u64; 8] = [4, 3, 2, 8, 4, 3, 2, 8];
+    const SECOND: [[u64; 8]; 3] = [
+        [2, 2, 2, 2, 1, 1, 1, 1],
+        [4, 4, 4, 4, 1, 1, 1, 1],
+        [8, 8, 8, 8, 1, 1, 1, 1],
+    ];
+
+    if first {
+        FIRST[ctrl]
+    } else {
+        SECOND[ix][ctrl]
+    }
+}
+
+impl WaitCycles {
+    fn new(game_pak_wait_ctrl: &[u8; 3], game_pak_ram_wait_ctrl: u8) -> WaitCycles {
+        let mut gamepak_rom_1st_8 = [0; 3];
+        let mut gamepak_rom_1st_16 = [0; 3];
+        let mut gamepak_rom_1st_32 = [0; 3];
+
+        let mut gamepak_rom_2nd_8 = [0; 3];
+        let mut gamepak_rom_2nd_16 = [0; 3];
+        let mut gamepak_rom_2nd_32 = [0; 3];
+
+        for ix in 0..3 {
+            let ctrl = game_pak_wait_ctrl[ix] as usize;
+            let wait_1st = game_pak_rom_wait_cycle(ix, ctrl, true);
+            let wait_2nd = game_pak_rom_wait_cycle(ix, ctrl, false);
+            gamepak_rom_1st_8[ix] = wait_1st;
+            gamepak_rom_1st_16[ix] = wait_1st;
+            gamepak_rom_1st_32[ix] = wait_1st + wait_2nd;
+            gamepak_rom_2nd_8[ix] = wait_2nd;
+            gamepak_rom_2nd_16[ix] = wait_2nd;
+            gamepak_rom_2nd_32[ix] = wait_2nd + wait_2nd;
+        }
+
+        let ram_wait = game_pak_ram_wait_cycle(game_pak_ram_wait_ctrl as usize);
+        let mut gamepak_ram_8 = ram_wait;
+        let mut gamepak_ram_16 = ram_wait * 2;
+        let mut gamepak_ram_32 = ram_wait * 3;
+
+        WaitCycles {
+            gamepak_rom_1st_8,
+            gamepak_rom_1st_16,
+            gamepak_rom_1st_32,
+            gamepak_rom_2nd_8,
+            gamepak_rom_2nd_16,
+            gamepak_rom_2nd_32,
+            gamepak_ram_8,
+            gamepak_ram_16,
+            gamepak_ram_32,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -143,6 +219,11 @@ impl Bus {
             }
         }
 
+        let game_pak_ram_wait_ctrl = 0;
+        let game_pak_wait_ctrl = [0; 3];
+
+        let wait_cycles = WaitCycles::new(&game_pak_wait_ctrl, game_pak_ram_wait_ctrl);
+
         Bus {
             bios,
             rom,
@@ -152,62 +233,52 @@ impl Bus {
             dma: Default::default(),
             timer: Default::default(),
 
+            key_input: 0,
             key_interrupt_spec: 0,
             key_interrupt_enable: false,
             key_interrupt_cond: false,
 
             sio: Default::default(),
 
-            game_pak_ram_wait_ctrl: 0,
-            game_pak_wait_ctrl: [0; 3],
+            game_pak_ram_wait_ctrl,
+            game_pak_wait_ctrl,
+
             phi_terminal_output_ctrl: 0,
             prefetch_buffer: false,
             game_pak_type: false,
 
             post_boot: 0,
 
+            wait_cycles,
+
             reg_width_r,
             reg_width_w,
         }
     }
 
-    pub fn game_pak_ram_wait_cycle(&self) -> u64 {
-        const TBL: [u64; 4] = [4, 3, 2, 8];
-        TBL[self.game_pak_ram_wait_ctrl as usize]
-    }
-
-    pub fn game_pak_wait_cycle(&self, ix: usize, first: bool) -> u64 {
-        const FIRST: [u64; 8] = [4, 3, 2, 8, 4, 3, 2, 8];
-        const SECOND: [[u64; 8]; 3] = [
-            [2, 2, 2, 2, 1, 1, 1, 1],
-            [4, 4, 4, 4, 1, 1, 1, 1],
-            [8, 8, 8, 8, 1, 1, 1, 1],
-        ];
-
-        let ctrl = self.game_pak_wait_ctrl[ix] as usize;
-
-        if first {
-            FIRST[ctrl]
-        } else {
-            SECOND[ix][ctrl]
-        }
-    }
-
-    pub fn read8(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
+    pub fn read8(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> u8 {
         // trace!("Read8: 0x{addr:08X}");
 
-        match (addr >> 24) & 0xF {
+        match addr >> 24 {
             0x0..=0x1 => {
+                ctx.elapse(1);
                 if addr < 0x00004000 {
                     self.bios[addr as usize]
                 } else {
                     panic!()
                 }
             }
-            0x2 => self.ext_ram[(addr & 0x3FFFF) as usize],
-            0x3 => self.ram[(addr & 0x7FFF) as usize],
+            0x2 => {
+                ctx.elapse(3);
+                self.ext_ram[(addr & 0x3FFFF) as usize]
+            }
+            0x3 => {
+                ctx.elapse(1);
+                self.ram[(addr & 0x7FFF) as usize]
+            }
 
             0x4 => {
+                ctx.elapse(1);
                 let data = self.io_read8(ctx, addr & 0xFFFF);
                 trace_io::<u8, true>(addr, data);
                 data
@@ -217,107 +288,119 @@ impl Bus {
             0x6 => panic!("Read 8bit data from VRAM"),
             0x7 => panic!("Read 8bit data from OAM"),
 
-            0x8..=0x9 => {
+            0x8..=0xD => {
+                let ix = (addr >> 25) as usize - 4;
+                ctx.elapse(if first {
+                    self.wait_cycles.gamepak_rom_1st_8[ix]
+                } else {
+                    self.wait_cycles.gamepak_rom_2nd_8[ix]
+                });
+
                 let ofs = (addr & 0x01FFFFFF) as usize;
                 if ofs < self.rom.data.len() {
                     self.rom.data[ofs]
                 } else {
-                    panic!()
+                    warn!("Read from invalid Game Pak ROM address: {addr:08X}");
+                    0
                 }
             }
-            0xA..=0xB => {
-                let ofs = (addr & 0x01FFFFFF) as usize;
-                if ofs < self.rom.data.len() {
-                    self.rom.data[ofs]
-                } else {
-                    panic!()
-                }
-            }
-            0xC..=0xD => {
-                let ofs = (addr & 0x01FFFFFF) as usize;
-                if ofs < self.rom.data.len() {
-                    self.rom.data[ofs]
-                } else {
-                    panic!()
-                }
-            }
+
             0xE..=0xF => {
                 todo!("GamePak RAM")
             }
-            _ => unreachable!(),
+            _ => panic!(),
         }
     }
 
-    pub fn read16(&mut self, ctx: &mut impl Context, addr: u32) -> u16 {
+    pub fn read16(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> u16 {
         // trace!("Read16: 0x{addr:08X}");
 
-        match (addr >> 24) & 0xF {
+        match addr >> 24 {
             0x0..=0x1 => {
                 if addr < 0x00004000 {
+                    ctx.elapse(1);
                     read16(&self.bios, addr as usize)
                 } else {
                     panic!()
                 }
             }
-            0x2 => read16(&self.ext_ram, (addr & 0x3FFFF) as usize),
-            0x3 => read16(&self.ram, (addr & 0x7FFF) as usize),
+            0x2 => {
+                ctx.elapse(3);
+                read16(&self.ext_ram, (addr & 0x3FFFF) as usize)
+            }
+            0x3 => {
+                ctx.elapse(1);
+                read16(&self.ram, (addr & 0x7FFF) as usize)
+            }
 
             0x4 => {
+                ctx.elapse(1);
                 let data = self.io_read16(ctx, addr & 0xFFFF);
                 trace_io::<u16, true>(addr, data);
                 data
             }
 
-            0x5 => read16(&ctx.lcd().palette, (addr & 0x3FF) as usize),
-            0x6 => read16(&ctx.lcd().vram, vram_addr(addr)),
-            0x7 => read16(&ctx.lcd().oam, (addr & 0x3FF) as usize),
+            // TODO: Plus 1 cycle if GBA accesses video memory at the same time.
+            0x5 => {
+                ctx.elapse(1);
+                read16(&ctx.lcd().palette, (addr & 0x3FF) as usize)
+            }
+            0x6 => {
+                ctx.elapse(1);
+                read16(&ctx.lcd().vram, vram_addr(addr))
+            }
+            0x7 => {
+                ctx.elapse(1);
+                read16(&ctx.lcd().oam, (addr & 0x3FF) as usize)
+            }
 
-            0x8..=0x9 => {
+            0x8..=0xD => {
+                let ix = (addr >> 25) as usize - 4;
+                ctx.elapse(if first {
+                    self.wait_cycles.gamepak_rom_1st_16[ix]
+                } else {
+                    self.wait_cycles.gamepak_rom_2nd_16[ix]
+                });
+
                 let ofs = (addr & 0x01FFFFFF) as usize;
                 if ofs < self.rom.data.len() {
                     read16(&self.rom.data, ofs)
                 } else {
-                    panic!()
+                    warn!("Read from invalid Game Pak ROM address: {addr:08X}");
+                    0
                 }
             }
-            0xA..=0xB => {
-                let ofs = (addr & 0x01FFFFFF) as usize;
-                if ofs < self.rom.data.len() {
-                    read16(&self.rom.data, ofs)
-                } else {
-                    panic!("{addr:08X}");
-                }
-            }
-            0xC..=0xD => {
-                let ofs = (addr & 0x01FFFFFF) as usize;
-                if ofs < self.rom.data.len() {
-                    read16(&self.rom.data, ofs)
-                } else {
-                    panic!()
-                }
-            }
+
             0xE..=0xF => {
                 todo!("GamePak RAM")
             }
-            _ => unreachable!(),
+            _ => panic!(),
         }
     }
 
-    pub fn read32(&mut self, ctx: &mut impl Context, addr: u32) -> u32 {
+    pub fn read32(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> u32 {
         // trace!("Read32: 0x{addr:08X}");
 
-        match (addr >> 24) & 0xF {
+        match addr >> 24 {
             0x0..=0x1 => {
                 if addr < 0x00004000 {
+                    ctx.elapse(1);
                     read32(&self.bios, addr as usize)
                 } else {
                     panic!()
                 }
             }
-            0x2 => read32(&self.ext_ram, (addr & 0x3FFFF) as usize),
-            0x3 => read32(&self.ram, (addr & 0x7FFF) as usize),
+            0x2 => {
+                ctx.elapse(6);
+                read32(&self.ext_ram, (addr & 0x3FFFF) as usize)
+            }
+            0x3 => {
+                ctx.elapse(1);
+                read32(&self.ram, (addr & 0x7FFF) as usize)
+            }
 
             0x4 => {
+                ctx.elapse(1);
                 let addr = addr & 0xFFFF;
                 let lo = self.io_read16(ctx, addr);
                 let hi = self.io_read16(ctx, addr + 2);
@@ -326,53 +409,63 @@ impl Bus {
                 data
             }
 
-            0x5 => read32(&ctx.lcd().palette, (addr & 0x3FF) as usize),
-            0x6 => read32(&ctx.lcd().vram, vram_addr(addr)),
-            0x7 => read32(&ctx.lcd().oam, (addr & 0x3FF) as usize),
+            // TODO: Plus 1 cycle if GBA accesses video memory at the same time.
+            0x5 => {
+                ctx.elapse(2);
+                read32(&ctx.lcd().palette, (addr & 0x3FF) as usize)
+            }
+            0x6 => {
+                ctx.elapse(2);
+                read32(&ctx.lcd().vram, vram_addr(addr))
+            }
+            0x7 => {
+                ctx.elapse(1);
+                read32(&ctx.lcd().oam, (addr & 0x3FF) as usize)
+            }
 
-            0x8..=0x9 => {
+            0x8..=0xD => {
+                let ix = (addr >> 25) as usize - 4;
+                ctx.elapse(if first {
+                    self.wait_cycles.gamepak_rom_1st_32[ix]
+                } else {
+                    self.wait_cycles.gamepak_rom_2nd_32[ix]
+                });
+
                 let ofs = (addr & 0x01FFFFFF) as usize;
                 if ofs < self.rom.data.len() {
                     read32(&self.rom.data, ofs)
                 } else {
-                    panic!()
+                    warn!("Read from invalid Game Pak ROM address: {addr:08X}");
+                    0
                 }
             }
-            0xA..=0xB => {
-                let ofs = (addr & 0x01FFFFFF) as usize;
-                if ofs < self.rom.data.len() {
-                    read32(&self.rom.data, ofs)
-                } else {
-                    panic!()
-                }
-            }
-            0xC..=0xD => {
-                let ofs = (addr & 0x01FFFFFF) as usize;
-                if ofs < self.rom.data.len() {
-                    read32(&self.rom.data, ofs)
-                } else {
-                    panic!()
-                }
-            }
+
             0xE..=0xF => {
                 todo!("GamePak RAM")
             }
-            _ => unreachable!(),
+            _ => panic!(),
         }
     }
 
-    pub fn write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8) {
+    pub fn write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8, first: bool) {
         // trace!("Write8: 0x{addr:08X} = 0x{data:02X}");
 
-        match (addr >> 24) & 0xF {
+        match addr >> 24 {
             0x0..=0x1 => {
                 // FIXME: ???
                 panic!("Write to BIOS");
             }
-            0x2 => self.ext_ram[(addr & 0x3FFFF) as usize] = data,
-            0x3 => self.ram[(addr & 0x7FFF) as usize] = data,
+            0x2 => {
+                ctx.elapse(3);
+                self.ext_ram[(addr & 0x3FFFF) as usize] = data;
+            }
+            0x3 => {
+                ctx.elapse(1);
+                self.ram[(addr & 0x7FFF) as usize] = data
+            }
 
             0x4 => {
+                ctx.elapse(1);
                 trace_io::<u8, false>(addr, data);
                 self.io_write8(ctx, addr & 0xFFFF, data);
             }
@@ -381,80 +474,104 @@ impl Bus {
             0x6 => panic!("Write 8bit data to VRAM"),
             0x7 => panic!("Write 8bit data to OAM"),
 
-            0x8..=0x9 => panic!("Write 8bit data to ROM"),
-            0xA..=0xB => panic!("Write 8bit data to ROM"),
-            0xC..=0xD => panic!("Write 8bit data to ROM"),
+            0x8..=0xD => panic!("Write 8bit data to ROM"),
 
             0xE..=0xF => {
                 todo!("GamePak RAM")
             }
-            _ => unreachable!(),
+            _ => panic!(),
         }
     }
 
-    pub fn write16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
+    pub fn write16(&mut self, ctx: &mut impl Context, addr: u32, data: u16, first: bool) {
         // trace!("Write16: 0x{addr:08X} = 0x{data:04X}");
 
-        match (addr >> 24) & 0xF {
+        match addr >> 24 {
             0x0..=0x1 => {
                 panic!("Write to BIOS");
             }
-            0x2 => write16(&mut self.ext_ram, (addr & 0x3FFFF) as usize, data),
-            0x3 => write16(&mut self.ram, (addr & 0x7FFF) as usize, data),
+            0x2 => {
+                ctx.elapse(3);
+                write16(&mut self.ext_ram, (addr & 0x3FFFF) as usize, data);
+            }
+            0x3 => {
+                ctx.elapse(1);
+                write16(&mut self.ram, (addr & 0x7FFF) as usize, data);
+            }
 
             0x4 => {
+                ctx.elapse(1);
                 trace_io::<u16, false>(addr, data);
                 self.io_write16(ctx, addr & 0xFFFF, data);
             }
 
-            0x5 => write16(&mut ctx.lcd_mut().palette, (addr & 0x3FF) as usize, data),
-            0x6 => write16(&mut ctx.lcd_mut().vram, vram_addr(addr), data),
-            0x7 => write16(&mut ctx.lcd_mut().oam, (addr & 0x3FF) as usize, data),
+            // TODO: Plus 1 cycle if GBA accesses video memory at the same time.
+            0x5 => {
+                ctx.elapse(1);
+                write16(&mut ctx.lcd_mut().palette, (addr & 0x3FF) as usize, data);
+            }
+            0x6 => {
+                ctx.elapse(1);
+                write16(&mut ctx.lcd_mut().vram, vram_addr(addr), data);
+            }
+            0x7 => {
+                ctx.elapse(1);
+                write16(&mut ctx.lcd_mut().oam, (addr & 0x3FF) as usize, data);
+            }
 
-            0x8..=0x9 => panic!("Write 8bit data to ROM"),
-            0xA..=0xB => panic!("Write 8bit data to ROM"),
-            0xC..=0xD => panic!("Write 8bit data to ROM"),
+            0x8..=0xD => panic!("Write 8bit data to ROM"),
 
             0xE..=0xF => {
                 todo!("GamePak RAM")
             }
-            _ => unreachable!(),
+            _ => panic!(),
         }
     }
 
-    pub fn write32(&mut self, ctx: &mut impl Context, addr: u32, data: u32) {
+    pub fn write32(&mut self, ctx: &mut impl Context, addr: u32, data: u32, first: bool) {
         // trace!("Write32: 0x{addr:08X} = 0x{data:08X}");
 
-        match (addr >> 24) & 0xF {
+        match addr >> 24 {
             0x0..=0x1 => {
-                if addr < 0x00004000 {
-                    write32(&mut self.bios, addr as usize, data)
-                } else {
-                    panic!()
-                }
+                panic!("Write to BIOS");
             }
-            0x2 => write32(&mut self.ext_ram, (addr & 0x3FFFF) as usize, data),
-            0x3 => write32(&mut self.ram, (addr & 0x7FFF) as usize, data),
+            0x2 => {
+                ctx.elapse(6);
+                write32(&mut self.ext_ram, (addr & 0x3FFFF) as usize, data);
+            }
+            0x3 => {
+                ctx.elapse(1);
+                write32(&mut self.ram, (addr & 0x7FFF) as usize, data);
+            }
 
             0x4 => {
+                ctx.elapse(1);
                 trace_io::<u32, false>(addr, data);
                 let addr = addr & 0xFFFF;
                 self.io_write16(ctx, addr, data as u16);
                 self.io_write16(ctx, addr + 2, (data >> 16) as u16);
             }
 
-            0x5 => write32(&mut ctx.lcd_mut().palette, (addr & 0x3FF) as usize, data),
-            0x6 => write32(&mut ctx.lcd_mut().vram, vram_addr(addr), data),
-            0x7 => write32(&mut ctx.lcd_mut().oam, (addr & 0x3FF) as usize, data),
+            // TODO: Plus 1 cycle if GBA accesses video memory at the same time.
+            0x5 => {
+                ctx.elapse(2);
+                write32(&mut ctx.lcd_mut().palette, (addr & 0x3FF) as usize, data);
+            }
+            0x6 => {
+                ctx.elapse(2);
+                write32(&mut ctx.lcd_mut().vram, vram_addr(addr), data);
+            }
+            0x7 => {
+                ctx.elapse(1);
+                write32(&mut ctx.lcd_mut().oam, (addr & 0x3FF) as usize, data);
+            }
 
-            0x8..=0x9 => panic!("Write 8bit data to ROM"),
-            0xA..=0xB => panic!("Write 8bit data to ROM"),
-            0xC..=0xD => panic!("Write 8bit data to ROM"),
+            0x8..=0xD => panic!("Write 8bit data to ROM"),
 
             0xE..=0xF => {
                 todo!("GamePak RAM")
             }
-            _ => unreachable!(),
+            _ => panic!(),
         }
     }
 }
@@ -471,8 +588,6 @@ impl Bus {
     pub fn io_read8(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
         match addr {
             0x000..=0x05F => {
-                // TODO: is this correct?
-                warn!("Read 8bit data from LCD register: 0x{addr:08X}");
                 let data = ctx.lcd_read16(addr & !1);
                 (data >> ((addr & 1) * 8)) as u8
             }
@@ -491,6 +606,14 @@ impl Bus {
         match addr {
             0x000..=0x05E => ctx.lcd_read16(addr),
             0x060..=0x0AE => ctx.sound_read16(addr),
+
+            // KEYINPUT
+            0x130 => self.key_input,
+
+            // IE
+            0x200 => ctx.interrupt().enable(),
+            // IF
+            0x202 => ctx.interrupt().request(),
 
             // WAITCNT
             0x204 => pack! {
@@ -514,7 +637,7 @@ impl Bus {
         match addr {
             0x000..=0x05F => {
                 warn!(
-                    "Writing 8bit data to LCD registers are ignored: 0x{addr:08X} = 0x{data:02X}"
+                    "Writing 8bit data to LCD registers are ignored: 0x{addr:03X} = 0x{data:02X}"
                 );
             }
             0x060..=0x0AF => ctx.sound_write8(addr, data),
@@ -525,11 +648,27 @@ impl Bus {
             }
             0x141..=0x14F => {}
 
+            // IF
+            0x202 => ctx.interrupt_mut().reset_request(data as u16),
+            0x203 => ctx.interrupt_mut().reset_request((data as u16 & 0x3F) << 8),
+
             // IME
             0x208 => ctx.interrupt_mut().set_master_enable((data & 1) != 0),
 
             // POSTFLG
             0x300 => self.post_boot = data,
+
+            // HALTCNT
+            0x301 => {
+                if data == 0x00 {
+                    info!("Enter halt mode");
+                    ctx.interrupt_mut().set_halt(true);
+                } else if data == 0x80 {
+                    // FIXME
+                    panic!("Enter stop mode");
+                    // ctx.interrupt_mut().set_stop(true);
+                }
+            }
 
             // ???
             0x410 => {}
@@ -674,7 +813,10 @@ impl Bus {
             0x15A..=0x15E => {}
 
             0x200 => ctx.interrupt_mut().set_enable(data & 0x3FFF),
-            0x202 => ctx.interrupt_mut().reset_request(data & 0x3FFF),
+            0x202 => {
+                self.io_write8(ctx, addr, data as u8);
+                self.io_write8(ctx, addr + 1, (data >> 8) as u8);
+            }
 
             // Game Pak Memory Wait Control
             0x204 => {
@@ -686,6 +828,9 @@ impl Bus {
                 self.phi_terminal_output_ctrl = v[11..=12].load();
                 self.prefetch_buffer = v[14];
                 self.game_pak_type = v[15];
+
+                self.wait_cycles =
+                    WaitCycles::new(&self.game_pak_wait_ctrl, self.game_pak_ram_wait_ctrl);
             }
 
             0x206 | 0x20A | 0x20C..=0x21E => {}
@@ -873,11 +1018,11 @@ const IO_REGS: &[IoReg] = io_regs! {
     // Serial
     0x4000120  4    R/W  SIODATA32 "SIO Data (Normal-32bit Mode; shared with below)"
     // 0x4000120  2    R/W  SIOMULTI0 "SIO Data 0 (Parent)    (Multi-Player Mode)"
-    // 0x4000122  2    R/W  SIOMULTI1 "SIO Data 1 (1st Child) (Multi-Player Mode)"
+    0x4000122  2    R/W  SIOMULTI1 "SIO Data 1 (1st Child) (Multi-Player Mode)"
     0x4000124  2    R/W  SIOMULTI2 "SIO Data 2 (2nd Child) (Multi-Player Mode)"
     0x4000126  2    R/W  SIOMULTI3 "SIO Data 3 (3rd Child) (Multi-Player Mode)"
     0x4000128  2    R/W  SIOCNT    "SIO Control Register"
-    0x400012A  2    R/W  SIOMLT_SEND "SIO Data (Local of MultiPlayer; shared below)"
+    // 0x400012A  2    R/W  SIOMLT_SEND "SIO Data (Local of MultiPlayer; shared below)"
     0x400012A  2    R/W  SIODATA8  "SIO Data (Normal-8bit and UART Mode)"
 
     // Keypad
@@ -903,7 +1048,6 @@ const IO_REGS: &[IoReg] = io_regs! {
     // 0x4000410  ?    ?    ?         "Undocumented - Purpose Unknown / Bug ??? 0FFh"
     // 0x4000800  4    R/W  ?         "Undocumented - Internal Memory Control (R/W)"
     // 0x4xx0800  4    R/W  ?         "Mirrors of 4000800h (repeated each 64K)"
-    // 0x4700000  4    W    (3DS)     "Disable ARM7 bootrom overlay (3DS only)"
 
     @end
 };

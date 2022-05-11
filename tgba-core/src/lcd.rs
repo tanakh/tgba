@@ -1,6 +1,12 @@
 use bitvec::prelude::*;
+use log::{info, trace};
 
-use crate::{context::Interrupt, util::trait_alias};
+use crate::{
+    consts::{CLOCK_PER_DOT, SCREEN_HEIGHT, SCREEN_WIDTH, VISIBLE_HEIGHT, VISIBLE_WIDTH},
+    context::{Interrupt, Timing},
+    interrupt::InterruptKind,
+    util::trait_alias,
+};
 
 #[derive(Default)]
 pub struct Lcd {
@@ -23,8 +29,8 @@ pub struct Lcd {
     vcounter_status: bool,
     vblank_irq_enable: bool,
     hblank_irq_enable: bool,
-    vcounter_irq_enable: bool,
-    vcount: u8,
+    vcount_irq_enable: bool,
+    vcount_irq: u8,
 
     bg: [Bg; 4],
     window: [Window; 2],
@@ -38,6 +44,12 @@ pub struct Lcd {
     obj_mosaic_v: u8,
 
     blend_ctrl: BlendCtrl,
+
+    prev_clock: u64,
+    fraction: u64,
+    x: u32,
+    y: u32,
+    frame: u64,
 }
 
 #[derive(Default)]
@@ -90,7 +102,7 @@ struct BlendCtrl {
     evy: u8,
 }
 
-trait_alias!(pub trait Context = Interrupt);
+trait_alias!(pub trait Context = Timing + Interrupt);
 
 impl Lcd {
     pub fn new() -> Lcd {
@@ -102,13 +114,75 @@ impl Lcd {
         }
     }
 
+    pub fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    pub fn tick(&mut self, ctx: &mut impl Context) {
+        let now = ctx.now();
+        let elapsed = now - self.prev_clock;
+        self.prev_clock = now;
+
+        self.fraction += elapsed;
+
+        while self.fraction >= CLOCK_PER_DOT {
+            self.fraction -= CLOCK_PER_DOT;
+            self.tick_dot(ctx);
+        }
+    }
+
+    fn tick_dot(&mut self, ctx: &mut impl Context) {
+        self.x += 1;
+
+        if self.y < VISIBLE_HEIGHT && self.x == VISIBLE_WIDTH {
+            // TODO: HBLANK
+            info!("Enter HBLANK: frame:{}, y:{:03}", self.frame, self.y);
+
+            if self.hblank_irq_enable {
+                ctx.interrupt_mut().set_interrupt(InterruptKind::HBlank);
+            }
+        }
+
+        if self.x >= SCREEN_WIDTH {
+            self.x -= SCREEN_WIDTH;
+            self.y += 1;
+
+            trace!("Frame:{}, Line:{:03}", self.frame, self.y);
+
+            if self.y as u32 == VISIBLE_HEIGHT {
+                // TODO: VBLANK
+                info!("Enter VBLANK: frame:{}", self.frame);
+
+                if self.vblank_irq_enable {
+                    ctx.interrupt_mut().set_interrupt(InterruptKind::VBlank);
+                }
+
+                // TODO: render line
+            }
+
+            if self.y == self.vcount_irq as u32 && self.vcount_irq_enable {
+                if self.vblank_irq_enable {
+                    ctx.interrupt_mut().set_interrupt(InterruptKind::VCount);
+                }
+            }
+
+            if self.y >= SCREEN_HEIGHT {
+                self.y -= SCREEN_HEIGHT;
+                self.frame += 1;
+            }
+        }
+    }
+
     pub fn read16(&mut self, ctx: &mut impl Context, addr: u32) -> u16 {
-        todo!()
+        match addr {
+            // VCOUNT
+            0x006 => self.y as u16,
+
+            _ => todo!("LCD read {addr:03X}"),
+        }
     }
 
     pub fn write16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
-        log::trace!("* {addr:08X} = {data:04X}");
-
         match addr {
             // DISPCNT
             0x000 => {
@@ -133,8 +207,8 @@ impl Lcd {
                 let v = data.view_bits::<Lsb0>();
                 self.vblank_irq_enable = v[3];
                 self.hblank_irq_enable = v[4];
-                self.vcounter_irq_enable = v[5];
-                self.vcount = v[8..=15].load();
+                self.vcount_irq_enable = v[5];
+                self.vcount_irq = v[8..=15].load();
             }
 
             // VCOUNT

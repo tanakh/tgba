@@ -1,6 +1,7 @@
 // #![feature(trace_macros)]
 
 mod bus;
+mod consts;
 mod context;
 mod cpu;
 mod interrupt;
@@ -25,8 +26,12 @@ impl Agb {
     }
 
     pub fn run_frame(&mut self) {
-        loop {
+        use context::Lcd;
+
+        let start_frame = self.ctx.lcd().frame();
+        while start_frame == self.ctx.lcd().frame() {
             self.ctx.cpu.exec_one(&mut self.ctx.inner);
+            self.ctx.lcd_tick();
         }
     }
 }
