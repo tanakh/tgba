@@ -278,10 +278,6 @@ impl<C: Context> Cpu<C> {
     }
 
     pub fn exec_one(&mut self, ctx: &mut C) {
-        // if ctx.now() > 75758229 - 100 {
-        //     self.trace = true;
-        // }
-
         if !self.regs.fiq_disable && ctx.interrupt().fiq() {
             ctx.interrupt_mut().set_halt(false);
             self.exception(Exception::FIQ);
@@ -1069,7 +1065,15 @@ fn decode_reg_sft_imm(cpu: &mut Cpu<impl Context>, instr: u32) -> (u32, bool) {
 fn decode_reg_sft_reg(cpu: &mut Cpu<impl Context>, instr: u32) -> (u32, bool) {
     assert!(instr & 0x10 != 0);
 
-    let rm = cpu.regs.r[(instr & 0xF) as usize];
+    let rm = (instr & 0xF) as usize;
+
+    // If a register is used to specify the shift amount the PC will be 12 bytes ahead
+    let rm = if rm != 15 {
+        cpu.regs.r[rm]
+    } else {
+        cpu.regs.r[rm].wrapping_add(4)
+    };
+
     let shift_type = (instr >> 5) & 0x3;
 
     let rs = ((instr >> 8) & 0xF) as usize;
@@ -1135,22 +1139,25 @@ fn calc_sft(shift_type: u32, a: u32, b: u8) -> (u32, bool) {
     }
 }
 
-fn decode_reg_sft(cpu: &mut Cpu<impl Context>, instr: u32) -> (u32, bool) {
-    if instr & 0x10 == 0 {
-        decode_reg_sft_imm(cpu, instr)
-    } else {
-        decode_reg_sft_reg(cpu, instr)
-    }
-}
-
-fn decode_op2<C: Context, const I: bool>(cpu: &mut Cpu<C>, instr: u32) -> (u32, bool) {
+fn decode_op2<C: Context, const I: bool>(cpu: &mut Cpu<C>, instr: u32) -> (u32, bool, bool) {
     if !I {
-        decode_reg_sft(cpu, instr)
+        if instr & 0x10 == 0 {
+            let (ret, c_flag) = decode_reg_sft_imm(cpu, instr);
+            (ret, c_flag, false)
+        } else {
+            let (ret, c_flag) = decode_reg_sft_reg(cpu, instr);
+            (ret, c_flag, true)
+        }
     } else {
         let imm = instr & 0xFF;
         let rot = (instr >> 8) & 0xF;
-        // FIXME: flags?
-        (imm.rotate_right(rot * 2), false)
+        let ret = imm.rotate_right(rot * 2);
+        let c_flag = if rot != 0 {
+            ret >> 31 != 0
+        } else {
+            cpu.regs.c_flag
+        };
+        (ret, c_flag, false)
     }
 }
 
@@ -1178,6 +1185,7 @@ fn alu<C: Context, const O: u8>(
     cpu: &mut Cpu<C>,
     op1: u32,
     op2: u32,
+    c_flag: bool,
     change_flag: bool,
 ) -> Option<u32> {
     let (ret, cmp) = match O {
@@ -1221,12 +1229,9 @@ fn alu<C: Context, const O: u8>(
         // ADC
         0b0101 => {
             if !change_flag {
-                (
-                    op1.wrapping_add(op2).wrapping_add(cpu.regs.c_flag as u32),
-                    false,
-                )
+                (op1.wrapping_add(op2).wrapping_add(c_flag as u32), false)
             } else {
-                let (ret, carry, overflow) = add_with_flag(op1, op2, cpu.regs.c_flag);
+                let (ret, carry, overflow) = add_with_flag(op1, op2, c_flag);
                 cpu.regs.c_flag = carry;
                 cpu.regs.v_flag = overflow;
                 (ret, false)
@@ -1238,7 +1243,7 @@ fn alu<C: Context, const O: u8>(
                 let borrow = 1 - cpu.regs.c_flag as u32;
                 (op1.wrapping_sub(op2).wrapping_sub(borrow), false)
             } else {
-                let (ret, carry, overflow) = sub_with_flag(op1, op2, cpu.regs.c_flag);
+                let (ret, carry, overflow) = sub_with_flag(op1, op2, c_flag);
                 cpu.regs.c_flag = carry;
                 cpu.regs.v_flag = overflow;
                 (ret, false)
@@ -1250,25 +1255,18 @@ fn alu<C: Context, const O: u8>(
                 let borrow = 1 - cpu.regs.c_flag as u32;
                 (op2.wrapping_sub(op1).wrapping_sub(borrow), false)
             } else {
-                let (ret, carry, overflow) = sub_with_flag(op2, op1, cpu.regs.c_flag);
+                let (ret, carry, overflow) = sub_with_flag(op2, op1, c_flag);
                 cpu.regs.c_flag = carry;
                 cpu.regs.v_flag = overflow;
                 (ret, false)
             }
         }
         // TST
-        0b1000 => {
-            assert!(change_flag);
-            (op1 & op2, true)
-        }
+        0b1000 => (op1 & op2, true),
         // TEQ
-        0b1001 => {
-            assert!(change_flag);
-            (op1 ^ op2, true)
-        }
+        0b1001 => (op1 ^ op2, true),
         // CMP
         0b1010 => {
-            assert!(change_flag);
             let (ret, carry, overflow) = sub_with_flag(op1, op2, true);
             cpu.regs.c_flag = carry;
             cpu.regs.v_flag = overflow;
@@ -1276,7 +1274,6 @@ fn alu<C: Context, const O: u8>(
         }
         // CMN
         0b1011 => {
-            assert!(change_flag);
             let (ret, carry, overflow) = add_with_flag(op1, op2, false);
             cpu.regs.c_flag = carry;
             cpu.regs.v_flag = overflow;
@@ -1315,14 +1312,19 @@ fn arm_op_alu<C: Context, const I: bool, const S: bool, const O: u8>(
 
     let change_flag = S && rd != 15;
 
-    let op1 = cpu.regs.r[rn];
-
-    let (op2, carry) = decode_op2::<C, I>(cpu, instr);
+    let c_flag = cpu.regs.c_flag;
+    let (op2, carry, shift_by_reg) = decode_op2::<C, I>(cpu, instr);
     if change_flag {
         cpu.regs.c_flag = carry;
     }
 
-    if let Some(res) = alu::<C, O>(cpu, op1, op2, change_flag) {
+    let op1 = if !(rn == 15 && shift_by_reg) {
+        cpu.regs.r[rn]
+    } else {
+        cpu.regs.r[rn].wrapping_add(4)
+    };
+
+    if let Some(res) = alu::<C, O>(cpu, op1, op2, c_flag, change_flag) {
         if rd != 15 {
             cpu.regs.r[rd] = res;
         } else {
@@ -1332,6 +1334,9 @@ fn arm_op_alu<C: Context, const I: bool, const S: bool, const O: u8>(
                 cpu.regs.set_cpsr(cpu.regs.spsr);
             }
         }
+    } else if rd == 15 {
+        assert!(cpu.regs.mode != MODE_USER);
+        cpu.regs.set_cpsr(cpu.regs.spsr);
     }
 }
 
@@ -1345,7 +1350,7 @@ fn disasm_op2(instr: u32) -> Option<String> {
         return if opr < 10 {
             Some(format!("#{opr}"))
         } else {
-            Some(format!("#0x{opr:X}"))
+            Some(format!("#0x{opr:x}"))
         };
     }
 
@@ -1361,12 +1366,14 @@ fn disasm_op2(instr: u32) -> Option<String> {
             return None;
         }
         let rs = (instr >> 8) & 0xF;
-        return Some(format!("r{rm}, {ty} R{rs}"));
+        return Some(format!("r{rm}, {ty} r{rs}"));
     }
 
     let amo = (instr >> 7) & 0x1F;
-    if amo == 0 {
+    if amo == 0 && ty == "lsl" {
         Some(format!("r{rm}"))
+    } else if amo == 0 && ty == "ror" {
+        Some(format!("r{rm}, rrx"))
     } else {
         Some(format!("r{rm}, {ty} #{amo}"))
     }
@@ -1401,9 +1408,9 @@ fn arm_op_mrs<C: Context, const S: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: 
     let rd = ((instr >> 12) & 0xF) as usize;
     assert_ne!(rd, 15);
     if !S {
-        cpu.regs.r[rd] = cpu.regs.spsr;
-    } else {
         cpu.regs.r[rd] = cpu.regs.cpsr();
+    } else {
+        cpu.regs.r[rd] = cpu.regs.spsr;
     }
 }
 
@@ -1426,26 +1433,32 @@ fn arm_op_msr<C: Context, const I: bool, const S: bool>(
     _ctx: &mut C,
     instr: u32,
 ) {
-    let flg = (instr >> 16) & 1;
     if !I {
-        assert!(instr & 0x0FBEFFF0 == 0x0128F000);
+        assert!(instr & 0x0FB6FFF0 == 0x0120F000, "instr: {instr:032b}");
     } else {
-        assert!(instr & 0x0FBEF000 == 0x0328F000);
+        assert!(instr & 0x0FB6F000 == 0x0320F000, "instr: {instr:032b}");
     }
+
+    let f = (instr >> 19) & 1 != 0;
+    let c = (instr >> 16) & 1 != 0;
+
     let src = decode_op2::<C, I>(cpu, instr).0;
+
+    let subst = |psr: u32| -> u32 {
+        let mut ret = psr;
+        if f {
+            ret = ret & !0xF0000000 | src & 0xF0000000;
+        }
+        if c {
+            ret = ret & !0x000000FF | src & 0x000000FF;
+        }
+        ret
+    };
+
     if S {
-        if flg == 0 {
-            cpu.regs.spsr = cpu.regs.spsr & !0xF0000000 | src & 0xF0000000;
-        } else {
-            cpu.regs.spsr = src;
-        }
+        cpu.regs.spsr = subst(cpu.regs.spsr);
     } else {
-        if flg == 0 {
-            cpu.regs
-                .set_cpsr(cpu.regs.cpsr() & !0xF0000000 | src & 0xF0000000);
-        } else {
-            cpu.regs.set_cpsr(src);
-        }
+        cpu.regs.set_cpsr(subst(cpu.regs.cpsr()));
     }
 }
 
@@ -1453,20 +1466,19 @@ fn arm_disasm_msr(instr: u32, _pc: u32) -> String {
     let cond = disasm_cond(instr);
     let p = (instr >> 22) & 1;
     let psr = if p == 0 { "cpsr" } else { "spsr" };
+    let f = if (instr >> 19) & 1 != 0 { "f" } else { "" };
+    let c = if (instr >> 16) & 1 != 0 { "c" } else { "" };
     let rm = instr & 0xF;
     if instr & 0x0FBFFFF0 == 0x0129F000 {
-        // cccc 0001 0p10 1001 1111 0000 0000 mmmm
-        format!("msr{cond} {psr}, r{rm}")
-    } else if instr & 0x0FBFF000 == 0x0128F000 {
-        // cccc 0001 0p10 1000 1111 0000 0000 mmmm
-        format!("msr{cond} {psr}_flg, r{rm}")
-    } else if instr & 0x0FBFF000 == 0x0328F000 {
-        // cccc 0011 0p10 1000 1111 rrrr iiii iiii
+        // cccc 0001 0p10 f00c 1111 0000 0000 mmmm
+        format!("msr{cond} {psr}_{c}{f}, r{rm}")
+    } else if instr & 0x0FB6F000 == 0x0320F000 {
+        // cccc 0011 0p10 f00c 1111 rrrr iiii iiii
         let rot = (instr >> 8) & 0xF;
         let imm = (instr & 0xFF).rotate_right(rot * 2);
-        format!("msr{cond} {psr}_flg, #0x{imm:x}")
+        format!("msr{cond} {psr}_{c}{f}, #0x{imm:x}")
     } else {
-        panic!()
+        panic!("invalid instr: {instr:08X}")
     }
 }
 
@@ -2339,9 +2351,9 @@ fn thumb_op_add_sub<C: Context, const I: bool, const OP: bool>(
     };
 
     let res = if !OP {
-        alu::<C, 0b0100>(cpu, op1, op2, true)
+        alu::<C, 0b0100>(cpu, op1, op2, cpu.regs.c_flag, true)
     } else {
-        alu::<C, 0b0010>(cpu, op1, op2, true)
+        alu::<C, 0b0010>(cpu, op1, op2, cpu.regs.c_flag, true)
     };
 
     cpu.regs.r[rd] = res.unwrap();
@@ -2368,10 +2380,10 @@ fn thumb_op_alu_imm8<C: Context, const OP: usize>(cpu: &mut Cpu<C>, _ctx: &mut C
     let op1 = cpu.regs.r[rd];
     let op2 = (instr & 0xFF) as u32;
     let res = match OP {
-        0 => alu::<C, 0b1101>(cpu, op1, op2, true),
-        1 => alu::<C, 0b1010>(cpu, op1, op2, true),
-        2 => alu::<C, 0b0100>(cpu, op1, op2, true),
-        3 => alu::<C, 0b0010>(cpu, op1, op2, true),
+        0 => alu::<C, 0b1101>(cpu, op1, op2, cpu.regs.c_flag, true),
+        1 => alu::<C, 0b1010>(cpu, op1, op2, cpu.regs.c_flag, true),
+        2 => alu::<C, 0b0100>(cpu, op1, op2, cpu.regs.c_flag, true),
+        3 => alu::<C, 0b0010>(cpu, op1, op2, cpu.regs.c_flag, true),
         _ => unreachable!(),
     };
     if let Some(res) = res {
@@ -2401,42 +2413,42 @@ fn thumb_op_alu<C: Context, const OP: usize>(cpu: &mut Cpu<C>, _ctx: &mut C, ins
     let op2 = cpu.regs.r[rs];
 
     let res = match OP {
-        0b0000 => alu::<C, 0b0000>(cpu, op1, op2, true),
-        0b0001 => alu::<C, 0b0001>(cpu, op1, op2, true),
+        0b0000 => alu::<C, 0b0000>(cpu, op1, op2, cpu.regs.c_flag, true),
+        0b0001 => alu::<C, 0b0001>(cpu, op1, op2, cpu.regs.c_flag, true),
         0b0010 => {
             let (op2, carry) = calc_sft(0, op1, op2 as u8);
             cpu.regs.c_flag = carry;
-            alu::<C, 0b1101>(cpu, op1, op2, true)
+            alu::<C, 0b1101>(cpu, op1, op2, cpu.regs.c_flag, true)
         }
         0b0011 => {
             let (op2, carry) = calc_sft(1, op1, op2 as u8);
             cpu.regs.c_flag = carry;
-            alu::<C, 0b1101>(cpu, op1, op2, true)
+            alu::<C, 0b1101>(cpu, op1, op2, cpu.regs.c_flag, true)
         }
         0b0100 => {
             let (op2, carry) = calc_sft(2, op1, op2 as u8);
             cpu.regs.c_flag = carry;
-            alu::<C, 0b1101>(cpu, op1, op2, true)
+            alu::<C, 0b1101>(cpu, op1, op2, cpu.regs.c_flag, true)
         }
-        0b0101 => alu::<C, 0b0101>(cpu, op1, op2, true),
-        0b0110 => alu::<C, 0b0110>(cpu, op1, op2, true),
+        0b0101 => alu::<C, 0b0101>(cpu, op1, op2, cpu.regs.c_flag, true),
+        0b0110 => alu::<C, 0b0110>(cpu, op1, op2, cpu.regs.c_flag, true),
         0b0111 => {
             let (op2, carry) = calc_sft(3, op1, op2 as u8);
             cpu.regs.c_flag = carry;
-            alu::<C, 0b1101>(cpu, op1, op2, true)
+            alu::<C, 0b1101>(cpu, op1, op2, cpu.regs.c_flag, true)
         }
-        0b1000 => alu::<C, 0b1000>(cpu, op1, op2, true),
-        0b1001 => alu::<C, 0b0011>(cpu, op2, 0, true),
-        0b1010 => alu::<C, 0b1010>(cpu, op1, op2, true),
-        0b1011 => alu::<C, 0b1011>(cpu, op1, op2, true),
-        0b1100 => alu::<C, 0b1100>(cpu, op1, op2, true),
+        0b1000 => alu::<C, 0b1000>(cpu, op1, op2, cpu.regs.c_flag, true),
+        0b1001 => alu::<C, 0b0011>(cpu, op2, 0, cpu.regs.c_flag, true),
+        0b1010 => alu::<C, 0b1010>(cpu, op1, op2, cpu.regs.c_flag, true),
+        0b1011 => alu::<C, 0b1011>(cpu, op1, op2, cpu.regs.c_flag, true),
+        0b1100 => alu::<C, 0b1100>(cpu, op1, op2, cpu.regs.c_flag, true),
         0b1101 => {
             let res = op1.wrapping_mul(op2);
             cpu.regs.set_nz(res);
             Some(res)
         }
-        0b1110 => alu::<C, 0b1110>(cpu, op1, op2, true),
-        0b1111 => alu::<C, 0b1111>(cpu, op1, op2, true),
+        0b1110 => alu::<C, 0b1110>(cpu, op1, op2, cpu.regs.c_flag, true),
+        0b1111 => alu::<C, 0b1111>(cpu, op1, op2, cpu.regs.c_flag, true),
         _ => unreachable!(),
     };
 
@@ -2486,9 +2498,9 @@ fn thumb_op_hireg<C: Context, const OP: usize, const H1: bool, const H2: bool>(
     let op2 = cpu.regs.r[rs] + if rs == 15 { 2 } else { 0 };
 
     let res = match OP {
-        0 => alu::<C, 0b0100>(cpu, op1, op2, false),
-        1 => alu::<C, 0b1010>(cpu, op1, op2, true),
-        2 => alu::<C, 0b1101>(cpu, op1, op2, false),
+        0 => alu::<C, 0b0100>(cpu, op1, op2, cpu.regs.c_flag, false),
+        1 => alu::<C, 0b1010>(cpu, op1, op2, cpu.regs.c_flag, true),
+        2 => alu::<C, 0b1101>(cpu, op1, op2, cpu.regs.c_flag, false),
         _ => unreachable!(),
     };
 

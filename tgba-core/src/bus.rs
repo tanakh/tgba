@@ -571,7 +571,7 @@ impl Bus {
             0xE..=0xF => {
                 todo!("GamePak RAM")
             }
-            _ => panic!(),
+            _ => panic!("Write32: 0x{addr:08X} = 0x{data:08X}"),
         }
     }
 }
