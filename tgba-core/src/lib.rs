@@ -12,6 +12,7 @@ mod util;
 
 use context::Context;
 
+pub use lcd::FrameBuf;
 pub use rom::Rom;
 
 pub struct Agb {
@@ -33,5 +34,10 @@ impl Agb {
             self.ctx.cpu.exec_one(&mut self.ctx.inner);
             self.ctx.lcd_tick();
         }
+    }
+
+    pub fn frame_buf(&self) -> &FrameBuf {
+        use context::Lcd;
+        self.ctx.lcd().frame_buf()
     }
 }

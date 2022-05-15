@@ -1,3 +1,5 @@
+use std::cmp::min;
+
 use bitvec::prelude::*;
 use log::{info, trace};
 
@@ -8,6 +10,8 @@ use crate::{
     util::{pack, trait_alias},
 };
 
+trait_alias!(pub trait Context = Timing + Interrupt);
+
 #[derive(Default)]
 pub struct Lcd {
     pub vram: Vec<u8>,
@@ -16,8 +20,8 @@ pub struct Lcd {
 
     bg_mode: u8,
     display_frame_select: bool,
-    hblank_obj_process: bool,
-    obj_format: bool,
+    hblank_obj_process: bool, // 0: enable, 1: disable
+    obj_format: bool,         // 0: 2-dim, 1: 1-dim
     force_blank: bool,
     display_bg: [bool; 4],
     display_obj: bool,
@@ -47,6 +51,70 @@ pub struct Lcd {
     x: u32,
     y: u32,
     frame: u64,
+
+    line_buf: Vec<u16>,
+    win_line_buf: Vec<Vec<u8>>,
+    obj_line_buf: Vec<u8>,
+    obj_line_buf_attr: Vec<ObjAttr>,
+    frame_buf: FrameBuf,
+}
+
+#[derive(Default)]
+pub struct FrameBuf {
+    width: u32,
+    height: u32,
+    buf: Vec<Pixel>,
+}
+
+impl FrameBuf {
+    pub fn new(width: u32, height: u32) -> Self {
+        FrameBuf {
+            width,
+            height,
+            buf: vec![Pixel::new(0, 0, 0); (width * height) as usize],
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> &Pixel {
+        &self.buf[(y * self.width + x) as usize]
+    }
+
+    pub fn pixel_mut(&mut self, x: u32, y: u32) -> &mut Pixel {
+        &mut self.buf[(y * self.width + x) as usize]
+    }
+}
+
+#[derive(Clone)]
+pub struct Pixel {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Pixel {
+    pub fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    pub fn from_u16(p: u16) -> Self {
+        Self {
+            r: extend_color(p & 0x1F),
+            g: extend_color((p >> 5) & 0x1F),
+            b: extend_color((p >> 10) & 0x1F),
+        }
+    }
+}
+
+fn extend_color(col5: u16) -> u8 {
+    ((col5 << 3) | (col5 >> 2)) as u8
 }
 
 #[derive(Default)]
@@ -99,7 +167,31 @@ struct BlendCtrl {
     evy: u8,
 }
 
-trait_alias!(pub trait Context = Timing + Interrupt);
+#[derive(Default, Clone)]
+struct ObjAttr(u8);
+
+impl ObjAttr {
+    fn priority(&self) -> u8 {
+        self.0 & 0x3
+    }
+    fn set_priority(&mut self, priority: u8) {
+        self.0 = (self.0 & !3) | (priority & 0x3);
+    }
+
+    fn semi_transparent(&self) -> bool {
+        (self.0 & 4) != 0
+    }
+    fn set_semi_transparent(&mut self, semi: bool) {
+        self.0 = (self.0 & !4) | (semi as u8) << 2;
+    }
+
+    fn window(&self) -> bool {
+        (self.0 & 8) != 0
+    }
+    fn set_window(&mut self, window: bool) {
+        self.0 = (self.0 & !8) | (window as u8) << 3;
+    }
+}
 
 impl Lcd {
     pub fn new() -> Lcd {
@@ -107,12 +199,21 @@ impl Lcd {
             vram: vec![0; 96 * 1024],
             oam: vec![0; 1024],
             palette: vec![0; 1024],
+            line_buf: vec![0; VISIBLE_WIDTH as usize],
+            win_line_buf: vec![vec![0; VISIBLE_WIDTH as usize]; 4],
+            obj_line_buf: vec![0; VISIBLE_WIDTH as usize],
+            obj_line_buf_attr: vec![ObjAttr::default(); VISIBLE_WIDTH as usize],
+            frame_buf: FrameBuf::new(VISIBLE_WIDTH, VISIBLE_HEIGHT),
             ..Default::default()
         }
     }
 
     pub fn frame(&self) -> u64 {
         self.frame
+    }
+
+    pub fn frame_buf(&self) -> &FrameBuf {
+        &self.frame_buf
     }
 
     pub fn tick(&mut self, ctx: &mut impl Context) {
@@ -135,6 +236,8 @@ impl Lcd {
             // TODO: HBLANK
             info!("Enter HBLANK: frame:{}, y:{:03}", self.frame, self.y);
 
+            self.render_line();
+
             if self.hblank_irq_enable {
                 ctx.interrupt_mut().set_interrupt(InterruptKind::HBlank);
             }
@@ -153,8 +256,6 @@ impl Lcd {
                 if self.vblank_irq_enable {
                     ctx.interrupt_mut().set_interrupt(InterruptKind::VBlank);
                 }
-
-                // TODO: render line
             }
 
             if self.y == self.vcount as u32 && self.vcount_irq_enable {
@@ -234,7 +335,7 @@ impl Lcd {
             // VCOUNT
             0x006 => {}
 
-            // BGxCnt
+            // BGxCNT
             0x008 | 0x00A | 0x00C | 0x00E => {
                 let i = ((addr - 0x008) / 2) as usize;
                 let bg_cntl = &mut self.bg[i];
@@ -370,5 +471,401 @@ impl Lcd {
 
             _ => todo!(),
         }
+    }
+}
+
+impl Lcd {
+    fn render_line(&mut self) {
+        if self.force_blank {
+            for x in 0..VISIBLE_WIDTH {
+                *self.frame_buf.pixel_mut(x, self.y) = Pixel::new(255, 255, 255);
+            }
+            return;
+        }
+
+        let back_drop = self.bg_palette256(0);
+        self.line_buf.fill(back_drop);
+
+        self.render_obj();
+
+        match self.bg_mode {
+            0 => {
+                self.render_text_bg(0);
+                self.render_text_bg(1);
+                self.render_text_bg(2);
+                self.render_text_bg(3);
+            }
+            1 => {
+                self.render_text_bg(0);
+                self.render_text_bg(1);
+                self.render_rotate_bg(2);
+            }
+            2 => {
+                self.render_rotate_bg(2);
+                self.render_rotate_bg(3);
+            }
+            3 => self.render_mode3_bg(),
+            4 => self.render_mode4_bg(),
+            5 => self.render_mode5_bg(),
+
+            _ => panic!("Invalid BG mode: {}", self.bg_mode),
+        }
+
+        // self.eval_priority();
+        // self.process_color_effect();
+
+        for x in 0..VISIBLE_WIDTH {
+            *self.frame_buf.pixel_mut(x, self.y) = Pixel::from_u16(self.line_buf[x as usize]);
+        }
+    }
+
+    fn render_text_bg(&mut self, i: usize) {
+        if !self.display_bg[i] {
+            return;
+        }
+
+        todo!();
+    }
+
+    fn render_rotate_bg(&mut self, i: usize) {
+        if !self.display_bg[i] {
+            return;
+        }
+
+        // todo!();
+    }
+
+    fn render_mode3_bg(&mut self) {
+        if !self.display_bg[2] {
+            return;
+        }
+
+        todo!();
+    }
+
+    fn render_mode4_bg(&mut self) {
+        if !self.display_bg[2] {
+            return;
+        }
+
+        let base_addr = if !self.display_frame_select {
+            0
+        } else {
+            0xA000
+        } + self.y * 0xF0;
+
+        trace!("Mode4");
+        trace!("Frame select: {}", self.display_frame_select);
+
+        // let line_buf = &mut self.win_line_buf[2];
+
+        for x in 0..VISIBLE_WIDTH {
+            // line_buf[x as usize] = self.vram[base_addr as usize + x as usize];
+            self.line_buf[x as usize] =
+                self.bg_palette256(self.vram[base_addr as usize + x as usize] as usize);
+        }
+    }
+
+    fn render_mode5_bg(&mut self) {
+        if !self.display_bg[2] {
+            return;
+        }
+
+        todo!();
+    }
+
+    fn render_obj(&mut self) {
+        if !self.display_obj {
+            return;
+        }
+
+        self.obj_line_buf_attr.fill(ObjAttr::default());
+
+        let num_of_hdots = if !self.hblank_obj_process {
+            SCREEN_WIDTH
+        } else {
+            VISIBLE_WIDTH
+        };
+
+        let mut avail_cycle = num_of_hdots * 4 - 6;
+
+        let obj_base_addr = 0x10000;
+
+        for i in 0..128 {
+            let oam = &self.oam[i * 8..i * 8 + 6];
+            let rot = oam[1] & 1 != 0;
+            let double = oam[1] & 2 != 0;
+
+            // This case is not displayed
+            if (double, rot) == (true, false) {
+                continue;
+            }
+
+            let y = oam[0] as u32;
+
+            // 00: normal
+            // 01: semi-transparent
+            // 10: obj window
+            // 11: prohibited
+            let mode = (oam[1] >> 2) & 3;
+            if mode == 3 {
+                continue;
+            }
+
+            let mosaic = oam[1] & 0x10 != 0;
+            let color_256 = oam[1] & 0x20 != 0;
+
+            let shape = (oam[1] >> 6) & 3;
+
+            // prohibited
+            if shape == 3 {
+                continue;
+            }
+
+            let x = oam[2] as u32 | (oam[3] as u32 & 1) << 8;
+
+            let size = (oam[3] >> 6) & 3;
+
+            const SIZE_TBL: [[(u32, u32); 4]; 3] = [
+                [(8, 8), (16, 16), (32, 32), (64, 64)],
+                [(16, 8), (32, 8), (32, 16), (64, 32)],
+                [(8, 16), (8, 32), (16, 32), (32, 64)],
+            ];
+
+            let (w, h) = SIZE_TBL[shape as usize][size as usize];
+
+            let char_name = oam[4] as u32 | (oam[5] as u32 & 3) << 8;
+
+            // On BG 3-5, Obj char ram is halved, so 0-511 are disabled
+            if self.bg_mode >= 3 && char_name < 512 {
+                continue;
+            }
+
+            let priority = (oam[5] >> 2) & 3;
+
+            let y_range = if y + h > 256 {
+                (0, (y + h) % 256)
+            } else {
+                (y, y + h)
+            };
+
+            if !(y_range.0 <= self.y && y_range.1 <= self.y) {
+                continue;
+            }
+
+            if !rot {
+                // Normal OBj
+
+                let hflip = oam[3] & 0x10 != 0;
+                let vflip = oam[3] & 0x20 != 0;
+
+                let dy = self.y - y_range.0;
+                let dy = if !vflip { dy } else { h - 1 - dy };
+
+                let mut put_pixel = |x: usize, col: u8| {
+                    match mode {
+                        // normal
+                        0 => {
+                            if self.obj_line_buf[x] == 0 {
+                                self.obj_line_buf[x] = col;
+                                self.obj_line_buf_attr[x].set_priority(priority);
+                                self.obj_line_buf_attr[x].set_semi_transparent(false);
+                            }
+                        }
+                        // semi-trans
+                        1 => {
+                            if self.obj_line_buf[x] == 0 {
+                                self.obj_line_buf[x] = col;
+                                self.obj_line_buf_attr[x].set_priority(priority);
+                                self.obj_line_buf_attr[x].set_semi_transparent(true);
+                            }
+                        }
+                        // obj-window
+                        2 => self.obj_line_buf_attr[x].set_window(true),
+                        _ => unreachable!(),
+                    }
+                };
+
+                if !color_256 {
+                    let palette_num = oam[5] >> 4;
+
+                    if !self.obj_format {
+                        // 2-dim
+                        let l_char = char_name + (dy / 8) * 32;
+
+                        for dx in 0..w {
+                            let cx = ((x + dx) % 512) as usize;
+                            if cx >= 240 {
+                                continue;
+                            }
+
+                            let bx = dx / 8;
+                            let ox = dx % 8;
+                            let addr = (l_char + bx * 2) * 32 + (dy % 8) * 4 + ox / 2;
+                            let col =
+                                (self.vram[(obj_base_addr + addr) as usize] >> (ox % 2 * 4)) & 0xf;
+                            if col != 0 {
+                                put_pixel(cx, palette_num * 16 + col);
+                            }
+                        }
+                    } else {
+                        // 1-dim
+                        let l_char = char_name + (dy / 8) * (w / 8);
+
+                        for dx in 0..w {
+                            let cx = ((x + dx) % 512) as usize;
+                            if cx >= 240 {
+                                continue;
+                            }
+
+                            let bx = dx / 8;
+                            let ox = dx % 8;
+                            let addr = (l_char + bx) * 32 + (dy % 8) * 4 + ox / 2;
+                            let col =
+                                (self.vram[(obj_base_addr + addr) as usize] >> (ox % 2 * 4)) & 0xf;
+                            if col != 0 {
+                                put_pixel(cx, palette_num * 16 + col);
+                            }
+                        }
+                    }
+                } else {
+                    if !self.obj_format {
+                        // 2-dim
+                        // On 256 color and 2-dimensional mode,
+                        // char name must be even number
+                        let char_name = char_name / 2;
+
+                        let l_char = char_name + (dy / 8) * 32;
+
+                        for dx in 0..w {
+                            let cx = ((x + dx) % 512) as usize;
+                            if cx >= 240 {
+                                continue;
+                            }
+
+                            let bx = dx / 8;
+                            let addr = (l_char + bx * 2) * 32 + (dy % 8) * 8 + (dx % 8);
+
+                            assert!(
+                                addr < 0x8000,
+                                "obj[{i}]: shape: {shape:02b}, char_name: {char_name:03X}, x: {x}, y: {y}, w: {w}, h: {h}"
+                            );
+
+                            let col = self.vram[(obj_base_addr + addr) as usize];
+                            if col != 0 {
+                                put_pixel(cx, col);
+                            }
+                        }
+                    } else {
+                        // 1-dim
+                        let l_char = char_name + (dy / 8) * (w / 8);
+
+                        for dx in 0..w {
+                            let cx = ((x + dx) % 512) as usize;
+                            if cx >= 240 {
+                                continue;
+                            }
+
+                            let bx = dx / 8;
+                            let addr = (l_char + bx) * 64 + (dy % 8) * 8 + (dx % 8);
+                            let col = self.vram[(obj_base_addr + addr) as usize];
+                            if col != 0 {
+                                put_pixel(cx, col);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // todo!("Rotate/Scaling Obj");
+
+                let rot_param = (oam[3] >> 1) & 0x1F;
+            }
+
+            // TODO: how many cycles for invisible objs?
+            avail_cycle -= min(avail_cycle, num_of_render_cycle(w, rot));
+
+            if avail_cycle == 0 {
+                break;
+            }
+        }
+    }
+
+    fn eval_priority(&mut self) {
+        let y_in_win0 = self.display_window[0]
+            && self.window[0].u as u32 <= self.y
+            && self.y < self.window[0].d as u32;
+        let y_in_win1 = self.display_window[1]
+            && self.window[1].u as u32 <= self.y
+            && self.y < self.window[1].d as u32;
+
+        for x in 0..VISIBLE_WIDTH {
+            let in_win0 = y_in_win0 && self.window[0].l as u32 <= x && x <= self.window[0].r as u32;
+            let in_win1 = y_in_win1 && self.window[1].l as u32 <= x && x <= self.window[1].r as u32;
+
+            let win_ctrl = if in_win0 {
+                &self.winin[0]
+            } else if in_win1 {
+                &self.winin[1]
+            } else if self.obj_line_buf_attr[x as usize].window() {
+                &self.objwin
+            } else {
+                &self.winout
+            };
+
+            let mut pixel = self.bg_palette256(0);
+
+            'priority: for p in 0..4 {
+                if self.display_obj
+                    && win_ctrl.display_obj
+                    && self.obj_line_buf_attr[x as usize].priority() == p
+                {
+                    let col = self.obj_line_buf[x as usize];
+                    if col != 0 {
+                        pixel = self.obj_palette256(col as _);
+                        break 'priority;
+                    }
+                }
+
+                for i in 0..4 {
+                    if self.display_bg[i] && win_ctrl.display_bg[i] && self.bg[i].priority == p {
+                        let col = self.win_line_buf[i][x as usize];
+                        if col != 0 {
+                            pixel = self.bg_palette256(col as _);
+                            break 'priority;
+                        }
+                    }
+                }
+            }
+
+            self.line_buf[x as usize] = pixel;
+        }
+    }
+
+    fn process_color_effect(&mut self) {
+        todo!();
+    }
+
+    fn bg_palette256(&self, i: usize) -> u16 {
+        u16::from_le_bytes(self.palette[i * 2..i * 2 + 2].try_into().unwrap())
+    }
+
+    fn bg_palette16(&self, i: usize, j: usize) -> u16 {
+        self.bg_palette256(i * 16 + j)
+    }
+
+    fn obj_palette256(&self, i: usize) -> u16 {
+        self.bg_palette256(256 + i)
+    }
+
+    fn obj_palette16(&self, i: usize, j: usize) -> u16 {
+        self.bg_palette256(256 + i * 16 + j)
+    }
+}
+
+fn num_of_render_cycle(width: u32, rot: bool) -> u32 {
+    if !rot {
+        width
+    } else {
+        width * 2 + 10
     }
 }

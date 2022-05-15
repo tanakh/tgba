@@ -6,14 +6,20 @@ extern crate prettytable;
 use anyhow::{anyhow, bail, Result};
 use compress_tools::{list_archive_files, uncompress_archive_file};
 use log::info;
+use sdl2::{event::Event, keyboard::Keycode, pixels::Color, surface::Surface};
 use std::{
     fs::{read, File},
     io::Read,
     path::Path,
+    time::Duration,
 };
 use tempfile::NamedTempFile;
 
 use tgba_core::{Agb, Rom};
+
+const SCREEN_WIDTH: u32 = 240;
+const SCREEN_HEIGHT: u32 = 160;
+const SCALING: u32 = 2;
 
 pub fn run(bios: &Path, rom: &Path) -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
@@ -24,8 +30,67 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
     dump_rom_info(&rom);
 
     let mut agb = Agb::new(bios, rom);
-    loop {
+
+    let sdl_context = sdl2::init().unwrap();
+    let video_subsystem = sdl_context.video().unwrap();
+
+    let window = video_subsystem
+        .window("TGBA", SCREEN_WIDTH * SCALING, SCREEN_HEIGHT * SCALING)
+        .position_centered()
+        .build()
+        .unwrap();
+
+    let mut canvas = window.into_canvas().build().unwrap();
+
+    canvas.set_draw_color(Color::RGB(0, 255, 255));
+    canvas.clear();
+    canvas.present();
+    let mut event_pump = sdl_context.event_pump().unwrap();
+    let mut i = 0;
+
+    let texture_creator = canvas.texture_creator();
+    let mut surface = Surface::new(
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+        sdl2::pixels::PixelFormatEnum::RGB24,
+    )
+    .unwrap();
+
+    'running: loop {
+        i = (i + 1) % 255;
+        canvas.set_draw_color(Color::RGB(0, 0, 0));
+        canvas.clear();
+        for event in event_pump.poll_iter() {
+            match event {
+                Event::Quit { .. }
+                | Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => break 'running,
+                _ => {}
+            }
+        }
+
         agb.run_frame();
+        let frame_buf = agb.frame_buf();
+
+        surface.with_lock_mut(|buf| {
+            for y in 0..SCREEN_HEIGHT {
+                for x in 0..SCREEN_WIDTH {
+                    let p = frame_buf.pixel(x, y);
+                    let ix = (y * SCREEN_WIDTH + x) as usize * 3;
+                    buf[ix] = p.r;
+                    buf[ix + 1] = p.g;
+                    buf[ix + 2] = p.b;
+                }
+            }
+        });
+
+        let texture = surface.as_texture(&texture_creator).unwrap();
+        canvas.copy(&texture, None, None).unwrap();
+
+        canvas.present();
+        std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
     }
 
     Ok(())
