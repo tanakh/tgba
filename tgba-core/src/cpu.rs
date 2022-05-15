@@ -1633,8 +1633,9 @@ impl Data for u32 {
 
 impl Data for u16 {
     fn load(ctx: &mut impl Context, addr: u32, first: bool) -> u32 {
-        // unaligned address cause an unpredictable value
-        ctx.read16(addr & !1, first) as u32
+        let ofs = addr & 1;
+        let data = ctx.read16(addr & !1, first) as u32;
+        data.rotate_right(ofs * 8)
     }
 
     fn store(ctx: &mut impl Context, addr: u32, data: u32, first: bool) {
@@ -1644,7 +1645,9 @@ impl Data for u16 {
 
 impl Data for i16 {
     fn load(ctx: &mut impl Context, addr: u32, first: bool) -> u32 {
-        ctx.read8(addr & !1, first) as i16 as u32
+        let ofs = addr & 1;
+        let data = ctx.read16(addr & !1, first) as i16;
+        (data >> (ofs * 8)) as u32
     }
 }
 
@@ -2053,7 +2056,6 @@ fn arm_disasm_ldstm(instr: u32, _pc: u32) -> String {
 fn fmt_reglist(reglist: u16) -> String {
     use std::fmt::Write;
 
-    assert_ne!(reglist, 0);
     let mut ret = String::new();
     let reglist = reglist.view_bits::<Lsb0>();
 
@@ -2412,28 +2414,37 @@ fn thumb_op_alu<C: Context, const OP: usize>(cpu: &mut Cpu<C>, _ctx: &mut C, ins
     let op1 = cpu.regs.r[rd];
     let op2 = cpu.regs.r[rs];
 
+    let sft = |ty: u32| {
+        let amount = op2 as u8;
+        if amount == 0 {
+            (op1, cpu.regs.c_flag)
+        } else {
+            calc_sft(ty, op1, amount)
+        }
+    };
+
     let res = match OP {
         0b0000 => alu::<C, 0b0000>(cpu, op1, op2, cpu.regs.c_flag, true),
         0b0001 => alu::<C, 0b0001>(cpu, op1, op2, cpu.regs.c_flag, true),
         0b0010 => {
-            let (op2, carry) = calc_sft(0, op1, op2 as u8);
+            let (op2, carry) = sft(0);
             cpu.regs.c_flag = carry;
             alu::<C, 0b1101>(cpu, op1, op2, cpu.regs.c_flag, true)
         }
         0b0011 => {
-            let (op2, carry) = calc_sft(1, op1, op2 as u8);
+            let (op2, carry) = sft(1);
             cpu.regs.c_flag = carry;
             alu::<C, 0b1101>(cpu, op1, op2, cpu.regs.c_flag, true)
         }
         0b0100 => {
-            let (op2, carry) = calc_sft(2, op1, op2 as u8);
+            let (op2, carry) = sft(2);
             cpu.regs.c_flag = carry;
             alu::<C, 0b1101>(cpu, op1, op2, cpu.regs.c_flag, true)
         }
         0b0101 => alu::<C, 0b0101>(cpu, op1, op2, cpu.regs.c_flag, true),
         0b0110 => alu::<C, 0b0110>(cpu, op1, op2, cpu.regs.c_flag, true),
         0b0111 => {
-            let (op2, carry) = calc_sft(3, op1, op2 as u8);
+            let (op2, carry) = sft(3);
             cpu.regs.c_flag = carry;
             alu::<C, 0b1101>(cpu, op1, op2, cpu.regs.c_flag, true)
         }
@@ -2508,7 +2519,7 @@ fn thumb_op_hireg<C: Context, const OP: usize, const H1: bool, const H2: bool>(
         if rd != 15 {
             cpu.regs.r[rd] = res;
         } else {
-            cpu.set_pc(res);
+            cpu.set_pc(res & !1);
         }
     }
 }
@@ -2719,6 +2730,9 @@ fn block_trans<C: Context, const L: bool, const IA: bool, const R: bool>(
     };
     let start = if IA { base } else { end };
 
+    // Writeback with Rb included in Rlist:
+    // Store OLD base if Rb is FIRST entry in Rlist, otherwise store NEW base (STM/ARMv4), always store OLD base (STM/ARMv5), no writeback (LDM/ARMv4/ARMv5; at this point, THUMB opcodes work different than ARM opcodes).
+
     let mut addr = start;
     let mut first = true;
     for i in 0..8 {
@@ -2726,7 +2740,12 @@ fn block_trans<C: Context, const L: bool, const IA: bool, const R: bool>(
             continue;
         }
         if !L {
-            u32::store(ctx, addr, cpu.regs.r[i], first);
+            let data = if i == rb && !first {
+                end
+            } else {
+                cpu.regs.r[i]
+            };
+            u32::store(ctx, addr, data, first);
         } else {
             cpu.regs.r[i] = u32::load(ctx, addr, first);
         }
@@ -2744,7 +2763,10 @@ fn block_trans<C: Context, const L: bool, const IA: bool, const R: bool>(
     if !first {
         cpu.fetch_first = true;
     }
-    cpu.regs.r[rb] = end;
+
+    if !(rlist & (1 << rb) != 0 && L) {
+        cpu.regs.r[rb] = end;
+    }
 }
 
 fn thumb_op_push_pop<C: Context, const L: bool, const R: bool>(
@@ -2767,7 +2789,18 @@ fn thumb_disasm_push_pop(instr: u16, _pc: u32) -> String {
 fn thumb_op_ldstm<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
     let rb = ((instr >> 8) & 7) as usize;
     let rlist = instr & 0xFF;
-    block_trans::<C, L, true, false>(cpu, ctx, rb, rlist);
+
+    // Empty Rlist: R15 loaded/stored (ARMv4 only), and Rb=Rb+40h (ARMv4-v5).
+    if rlist == 0 {
+        if L {
+            cpu.set_pc(u32::load(ctx, cpu.regs.r[rb], true));
+        } else {
+            u32::store(ctx, cpu.regs.r[rb], cpu.regs.r[15].wrapping_add(4), true);
+        }
+        cpu.regs.r[rb] = cpu.regs.r[rb].wrapping_add(0x40);
+    } else {
+        block_trans::<C, L, true, false>(cpu, ctx, rb, rlist);
+    }
 }
 
 fn thumb_disasm_ldstm(instr: u16, _pc: u32) -> String {
