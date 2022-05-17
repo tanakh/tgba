@@ -52,11 +52,15 @@ pub struct Lcd {
     y: u32,
     frame: u64,
 
-    line_buf: Vec<u16>,
-    win_line_buf: Vec<Vec<u8>>,
-    obj_line_buf: Vec<u8>,
-    obj_line_buf_attr: Vec<ObjAttr>,
+    line_buf: LineBuf,
     frame_buf: FrameBuf,
+}
+
+#[derive(Clone)]
+pub struct Pixel {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
 }
 
 #[derive(Default)]
@@ -92,13 +96,6 @@ impl FrameBuf {
     }
 }
 
-#[derive(Clone)]
-pub struct Pixel {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
 impl Pixel {
     pub fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b }
@@ -115,6 +112,30 @@ impl Pixel {
 
 fn extend_color(col5: u16) -> u8 {
     ((col5 << 3) | (col5 >> 2)) as u8
+}
+
+struct LineBuf {
+    bg: [Vec<u16>; 4],
+    obj: Vec<u16>,
+    obj_attr: Vec<ObjAttr>,
+    surface: [Vec<u16>; 2],
+    surface_priority: [Vec<u8>; 2],
+    surface_attr: [Vec<u8>; 2],
+    finished: Vec<u16>,
+}
+
+impl Default for LineBuf {
+    fn default() -> Self {
+        Self {
+            bg: <[Vec<u16>; 4]>::default().map(|_| vec![0x8000; VISIBLE_WIDTH as _]),
+            obj: vec![0; VISIBLE_WIDTH as _],
+            obj_attr: vec![Default::default(); VISIBLE_WIDTH as _],
+            surface: <[Vec<u16>; 2]>::default().map(|_| vec![0x8000; VISIBLE_WIDTH as _]),
+            surface_priority: <[Vec<u8>; 2]>::default().map(|_| vec![0; VISIBLE_WIDTH as _]),
+            surface_attr: <[Vec<u8>; 2]>::default().map(|_| vec![0; VISIBLE_WIDTH as _]),
+            finished: vec![0; VISIBLE_WIDTH as _],
+        }
+    }
 }
 
 #[derive(Default)]
@@ -147,7 +168,7 @@ struct Window {
     d: u8,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug)]
 struct WindowCtrl {
     display_bg: [bool; 4],
     display_obj: bool,
@@ -199,10 +220,6 @@ impl Lcd {
             vram: vec![0; 96 * 1024],
             oam: vec![0; 1024],
             palette: vec![0; 1024],
-            line_buf: vec![0; VISIBLE_WIDTH as usize],
-            win_line_buf: vec![vec![0; VISIBLE_WIDTH as usize]; 4],
-            obj_line_buf: vec![0; VISIBLE_WIDTH as usize],
-            obj_line_buf_attr: vec![ObjAttr::default(); VISIBLE_WIDTH as usize],
             frame_buf: FrameBuf::new(VISIBLE_WIDTH, VISIBLE_HEIGHT),
             ..Default::default()
         }
@@ -418,6 +435,8 @@ impl Lcd {
 
             // WININ / WINOUT
             0x048 | 0x04A => {
+                eprintln!("WININ/WINOUT: {addr:08X} = {data:04X}");
+
                 let v = data.view_bits::<Lsb0>();
                 for i in 0..2 {
                     let ctrl = if addr == 0x048 {
@@ -483,10 +502,26 @@ impl Lcd {
             return;
         }
 
-        let back_drop = self.bg_palette256(0);
-        self.line_buf.fill(back_drop);
+        self.line_buf.obj_attr.fill(ObjAttr::default());
+        self.line_buf.obj.fill(0x8000);
+        for i in 0..4 {
+            self.line_buf.bg[i].fill(0x8000);
+        }
+        self.line_buf.surface_priority[0].fill(4);
+        self.line_buf.surface_priority[1].fill(4);
+
+        eprintln!("Render line: y = {}, mode = {}", self.y, self.bg_mode);
 
         self.render_obj();
+
+        // eprint!("OBj: ");
+        // for x in 0..VISIBLE_WIDTH as usize {
+        //     eprint!(
+        //         "{:04X}:{:02X} ",
+        //         self.line_buf.obj[x], self.line_buf.obj_attr[x].0
+        //     );
+        // }
+        // eprintln!();
 
         match self.bg_mode {
             0 => {
@@ -511,11 +546,34 @@ impl Lcd {
             _ => panic!("Invalid BG mode: {}", self.bg_mode),
         }
 
-        // self.eval_priority();
-        // self.process_color_effect();
+        // for i in 0..4 {
+        //     eprint!("BG{i}: ");
+        //     for x in 0..VISIBLE_WIDTH as usize {
+        //         eprint!("{:04X} ", self.line_buf.bg[i][x]);
+        //     }
+        //     eprintln!();
+        // }
+
+        self.eval_priority();
+
+        // for i in 0..2 {
+        //     eprint!("Surface{i}: ");
+        //     for x in 0..VISIBLE_WIDTH as usize {
+        //         eprint!(
+        //             "{x:03}:{:04X}:{}:{} ",
+        //             self.line_buf.surface[i][x],
+        //             self.line_buf.surface_priority[i][x],
+        //             self.line_buf.surface_attr[i][x]
+        //         );
+        //     }
+        //     eprintln!();
+        // }
+
+        self.color_special_effect();
 
         for x in 0..VISIBLE_WIDTH {
-            *self.frame_buf.pixel_mut(x, self.y) = Pixel::from_u16(self.line_buf[x as usize]);
+            *self.frame_buf.pixel_mut(x, self.y) =
+                Pixel::from_u16(self.line_buf.finished[x as usize]);
         }
     }
 
@@ -532,11 +590,62 @@ impl Lcd {
             return;
         }
 
-        // todo!();
+        const BG_SIZE_TBL: &[u32] = &[128, 256, 512, 1024];
+
+        let size = BG_SIZE_TBL[self.bg[i].screen_size as usize];
+
+        let screen_base_addr = self.bg[i].screen_base_block as usize * 0x800;
+        let char_base_addr = self.bg[i].char_base_block as usize * 0x4000;
+
+        // TODO: mosaic
+        // TODO: overflow / wrapping
+
+        let dx = sign_extend(self.bg[i].dx as u32, 15);
+        let dmx = sign_extend(self.bg[i].dmx as u32, 15);
+        let dy = sign_extend(self.bg[i].dy as u32, 15);
+        let dmy = sign_extend(self.bg[i].dmy as u32, 15);
+
+        eprintln!(
+            "BG{i}: size: {size}x{size}, refx: {refx}, refy: {refy}, dx = {dx}, dmx = {dmx}, dy = {dy}, dmy = {dmy}",
+            refx = sign_extend(self.bg[i].x, 27) as f64 / 256.0,
+            refy = sign_extend(self.bg[i].y, 27) as f64 / 256.0,
+            dx = dx as f64 / 256.0,
+            dmx = dmx as f64 / 256.0,
+            dy = dy as f64 / 256.0,
+            dmy = dmy as f64 / 256.0,
+        );
+
+        let mut cx = sign_extend(self.bg[i].x, 27) + self.y as i32 * dmx;
+        let mut cy = sign_extend(self.bg[i].y, 27) + self.y as i32 * dmy;
+
+        for x in 0..VISIBLE_WIDTH {
+            let x2 = (cx >> 8) as u32 & (size - 1);
+            let y2 = (cy >> 8) as u32 & (size - 1);
+
+            let bx = (x2 / 8) as usize;
+            let by = (y2 / 8) as usize;
+
+            let ox = (x2 % 8) as usize;
+            let oy = (y2 % 8) as usize;
+
+            let char = self.vram[screen_base_addr + by * size as usize / 8 + bx];
+            let col_num = self.vram[char_base_addr + char as usize * 64 + oy * 8 + ox];
+
+            // eprintln!("x: {x:3}, x2: {x2:3}, y2: {y2:3}, col: {col_num:03X}");
+
+            if col_num != 0 {
+                self.line_buf.bg[i][x as usize] = self.bg_palette256(col_num as _);
+            }
+
+            cx += dx;
+            cy += dy;
+        }
     }
 
     fn render_mode3_bg(&mut self) {
-        if !self.display_bg[2] {
+        let i = 2;
+
+        if !self.display_bg[i] {
             return;
         }
 
@@ -544,7 +653,9 @@ impl Lcd {
     }
 
     fn render_mode4_bg(&mut self) {
-        if !self.display_bg[2] {
+        let i = 2;
+
+        if !self.display_bg[i] {
             return;
         }
 
@@ -554,20 +665,18 @@ impl Lcd {
             0xA000
         } + self.y * 0xF0;
 
-        trace!("Mode4");
-        trace!("Frame select: {}", self.display_frame_select);
-
-        // let line_buf = &mut self.win_line_buf[2];
-
         for x in 0..VISIBLE_WIDTH {
-            // line_buf[x as usize] = self.vram[base_addr as usize + x as usize];
-            self.line_buf[x as usize] =
-                self.bg_palette256(self.vram[base_addr as usize + x as usize] as usize);
+            let col_num = self.vram[base_addr as usize + x as usize];
+            if col_num != 0 {
+                self.line_buf.bg[i][x as usize] = self.bg_palette256(col_num as _);
+            }
         }
     }
 
     fn render_mode5_bg(&mut self) {
-        if !self.display_bg[2] {
+        let i = 2;
+
+        if !self.display_bg[i] {
             return;
         }
 
@@ -578,8 +687,6 @@ impl Lcd {
         if !self.display_obj {
             return;
         }
-
-        self.obj_line_buf_attr.fill(ObjAttr::default());
 
         let num_of_hdots = if !self.hblank_obj_process {
             SCREEN_WIDTH
@@ -626,13 +733,13 @@ impl Lcd {
 
             let size = (oam[3] >> 6) & 3;
 
-            const SIZE_TBL: [[(u32, u32); 4]; 3] = [
+            const OBJ_SIZE_TBL: [[(u32, u32); 4]; 3] = [
                 [(8, 8), (16, 16), (32, 32), (64, 64)],
                 [(16, 8), (32, 8), (32, 16), (64, 32)],
                 [(8, 16), (8, 32), (16, 32), (32, 64)],
             ];
 
-            let (w, h) = SIZE_TBL[shape as usize][size as usize];
+            let (w, h) = OBJ_SIZE_TBL[shape as usize][size as usize];
 
             let char_name = oam[4] as u32 | (oam[5] as u32 & 3) << 8;
 
@@ -649,8 +756,18 @@ impl Lcd {
                 (y, y + h)
             };
 
-            if !(y_range.0 <= self.y && y_range.1 <= self.y) {
+            if !(y_range.0 <= self.y && self.y < y_range.1) {
                 continue;
+            }
+
+            if (x, y, w, h) != (0, 0, 8, 8) {
+                eprintln!(
+                    "OBJ[{i:03}]: x: {x:3}, y: {y:3}, w: {w:3}, h: {h:3}, col: {col:3}, dim: {dim}, chr: 0x{char_name:03X}, type: {ty:4}, double: {dbl}",
+                    ty = if !rot { "norm" } else { "rot" },
+                    col = if color_256 {256} else {16},
+                    dim = if self.obj_format {1} else {2},
+                    dbl = if double {"y"} else {"n"},
+                );
             }
 
             if !rot {
@@ -661,30 +778,6 @@ impl Lcd {
 
                 let dy = self.y - y_range.0;
                 let dy = if !vflip { dy } else { h - 1 - dy };
-
-                let mut put_pixel = |x: usize, col: u8| {
-                    match mode {
-                        // normal
-                        0 => {
-                            if self.obj_line_buf[x] == 0 {
-                                self.obj_line_buf[x] = col;
-                                self.obj_line_buf_attr[x].set_priority(priority);
-                                self.obj_line_buf_attr[x].set_semi_transparent(false);
-                            }
-                        }
-                        // semi-trans
-                        1 => {
-                            if self.obj_line_buf[x] == 0 {
-                                self.obj_line_buf[x] = col;
-                                self.obj_line_buf_attr[x].set_priority(priority);
-                                self.obj_line_buf_attr[x].set_semi_transparent(true);
-                            }
-                        }
-                        // obj-window
-                        2 => self.obj_line_buf_attr[x].set_window(true),
-                        _ => unreachable!(),
-                    }
-                };
 
                 if !color_256 {
                     let palette_num = oam[5] >> 4;
@@ -699,14 +792,13 @@ impl Lcd {
                                 continue;
                             }
 
+                            let dx = if !hflip { dx } else { w - 1 - dx };
                             let bx = dx / 8;
                             let ox = dx % 8;
                             let addr = (l_char + bx * 2) * 32 + (dy % 8) * 4 + ox / 2;
-                            let col =
+                            let col_num =
                                 (self.vram[(obj_base_addr + addr) as usize] >> (ox % 2 * 4)) & 0xf;
-                            if col != 0 {
-                                put_pixel(cx, palette_num * 16 + col);
-                            }
+                            self.put_obj_pixel16(cx, palette_num, col_num, mode, priority);
                         }
                     } else {
                         // 1-dim
@@ -718,14 +810,13 @@ impl Lcd {
                                 continue;
                             }
 
+                            let dx = if !hflip { dx } else { w - 1 - dx };
                             let bx = dx / 8;
                             let ox = dx % 8;
                             let addr = (l_char + bx) * 32 + (dy % 8) * 4 + ox / 2;
-                            let col =
+                            let col_num =
                                 (self.vram[(obj_base_addr + addr) as usize] >> (ox % 2 * 4)) & 0xf;
-                            if col != 0 {
-                                put_pixel(cx, palette_num * 16 + col);
-                            }
+                            self.put_obj_pixel16(cx, palette_num, col_num, mode, priority);
                         }
                     }
                 } else {
@@ -733,9 +824,9 @@ impl Lcd {
                         // 2-dim
                         // On 256 color and 2-dimensional mode,
                         // char name must be even number
-                        let char_name = char_name / 2;
 
-                        let l_char = char_name + (dy / 8) * 32;
+                        let tx = (char_name % 32) & !1;
+                        let ty = char_name / 32;
 
                         for dx in 0..w {
                             let cx = ((x + dx) % 512) as usize;
@@ -743,37 +834,34 @@ impl Lcd {
                                 continue;
                             }
 
-                            let bx = dx / 8;
-                            let addr = (l_char + bx * 2) * 32 + (dy % 8) * 8 + (dx % 8);
-
-                            assert!(
-                                addr < 0x8000,
-                                "obj[{i}]: shape: {shape:02b}, char_name: {char_name:03X}, x: {x}, y: {y}, w: {w}, h: {h}"
-                            );
-
-                            let col = self.vram[(obj_base_addr + addr) as usize];
-                            if col != 0 {
-                                put_pixel(cx, col);
-                            }
+                            let dx = if !hflip { dx } else { w - 1 - dx };
+                            let tile_num = (ty + dy / 8) * 32 + tx + dx / 8 * 2;
+                            let addr = tile_num * 32 + (dy % 8) * 8 + dx % 8;
+                            let col_num = self.vram[(obj_base_addr + addr) as usize];
+                            self.put_obj_pixel256(cx, col_num, mode, priority);
                         }
                     } else {
                         // 1-dim
-                        let l_char = char_name + (dy / 8) * (w / 8);
 
-                        for dx in 0..w {
-                            let cx = ((x + dx) % 512) as usize;
-                            if cx >= 240 {
-                                continue;
-                            }
-
-                            let bx = dx / 8;
-                            let addr = (l_char + bx) * 64 + (dy % 8) * 8 + (dx % 8);
-                            let col = self.vram[(obj_base_addr + addr) as usize];
-                            if col != 0 {
-                                put_pixel(cx, col);
-                            }
-                        }
+                        todo!();
                     }
+                }
+
+                // for Debugging
+                if self.y == y_range.0 || self.y + 1 == y_range.1 {
+                    for dx in 0..w {
+                        let cx = ((x + dx) % 512) as usize;
+                        if cx >= 240 {
+                            continue;
+                        }
+                        self.put_obj_pixel256(cx, 1, mode, priority);
+                    }
+                }
+                if x < 240 {
+                    self.put_obj_pixel256(x as _, 1, mode, priority);
+                }
+                if (x + w - 1) % 512 < 240 {
+                    self.put_obj_pixel256(((x + w - 1) % 512) as _, 1, mode, priority);
                 }
             } else {
                 // todo!("Rotate/Scaling Obj");
@@ -790,13 +878,79 @@ impl Lcd {
         }
     }
 
+    fn put_obj_pixel16(&mut self, x: usize, palette_num: u8, col_num: u8, mode: u8, priority: u8) {
+        if col_num != 0 {
+            self.put_obj_pixel256(x, palette_num * 16 + col_num, mode, priority);
+        }
+    }
+
+    fn put_obj_pixel256(&mut self, x: usize, col_num: u8, mode: u8, priority: u8) {
+        if col_num != 0 {
+            let col = self.obj_palette256(col_num as _);
+            match mode {
+                // normal
+                0 => {
+                    if self.line_buf.obj[x] & 0x8000 != 0 {
+                        self.line_buf.obj[x] = col;
+                        self.line_buf.obj_attr[x].set_priority(priority);
+                        self.line_buf.obj_attr[x].set_semi_transparent(false);
+                    }
+                }
+                // semi-trans
+                1 => {
+                    if self.line_buf.obj[x] & 0x8000 != 0 {
+                        self.line_buf.obj[x] = col;
+                        self.line_buf.obj_attr[x].set_priority(priority);
+                        self.line_buf.obj_attr[x].set_semi_transparent(true);
+                    }
+                }
+                // obj-window
+                2 => self.line_buf.obj_attr[x].set_window(true),
+                _ => unreachable!(),
+            }
+        }
+    }
+
     fn eval_priority(&mut self) {
         let y_in_win0 = self.display_window[0]
             && self.window[0].u as u32 <= self.y
-            && self.y < self.window[0].d as u32;
+            && self.y <= self.window[0].d as u32;
         let y_in_win1 = self.display_window[1]
             && self.window[1].u as u32 <= self.y
-            && self.y < self.window[1].d as u32;
+            && self.y <= self.window[1].d as u32;
+
+        eprintln!("Eval priority:");
+
+        for i in 0..2 {
+            eprintln!("  - Window {i}:");
+            eprintln!(
+                "    - region: ({}, {}) - ({}, {})",
+                self.window[i].l, self.window[i].u, self.window[i].r, self.window[i].d,
+            );
+            eprintln!("    - display: {}", self.display_window[i],);
+            eprintln!("    - ctrl: {:?}", self.winin[i]);
+        }
+
+        eprintln!(" - Objwin:");
+        eprintln!("    - display: {}", self.display_obj_window);
+        eprintln!("    - ctrl: {:?}", self.objwin);
+
+        eprintln!(" - Winout:");
+        eprintln!("    - ctrl: {:?}", self.winout);
+
+        eprintln!("  - Display BG:  {:?}", self.display_bg,);
+        eprintln!("  - Display Obj: {}", self.display_obj);
+
+        let winout_enable =
+            self.display_window[0] || self.display_window[1] || self.display_obj_window;
+
+        let any = WindowCtrl {
+            display_bg: [true, true, true, true],
+            display_obj: true,
+            color_special_effect: false,
+        };
+
+        // FIXME: how to use color special effect flag on window?
 
         for x in 0..VISIBLE_WIDTH {
             let in_win0 = y_in_win0 && self.window[0].l as u32 <= x && x <= self.window[0].r as u32;
@@ -806,47 +960,123 @@ impl Lcd {
                 &self.winin[0]
             } else if in_win1 {
                 &self.winin[1]
-            } else if self.obj_line_buf_attr[x as usize].window() {
+            } else if self.line_buf.obj_attr[x as usize].window() {
                 &self.objwin
-            } else {
+            } else if winout_enable {
                 &self.winout
-            };
+            } else {
+                &any
+            }
+            .clone();
 
-            let mut pixel = self.bg_palette256(0);
+            let x = x as usize;
 
-            'priority: for p in 0..4 {
-                if self.display_obj
-                    && win_ctrl.display_obj
-                    && self.obj_line_buf_attr[x as usize].priority() == p
-                {
-                    let col = self.obj_line_buf[x as usize];
-                    if col != 0 {
-                        pixel = self.obj_palette256(col as _);
-                        break 'priority;
-                    }
+            for i in 0..4 {
+                if !(self.display_bg[i] && win_ctrl.display_bg[i]) {
+                    continue;
                 }
 
-                for i in 0..4 {
-                    if self.display_bg[i] && win_ctrl.display_bg[i] && self.bg[i].priority == p {
-                        let col = self.win_line_buf[i][x as usize];
-                        if col != 0 {
-                            pixel = self.bg_palette256(col as _);
-                            break 'priority;
-                        }
-                    }
+                let col = self.line_buf.bg[i][x];
+                if col & 0x8000 == 0 {
+                    self.put_surface_pixel(x, col, self.bg[i].priority, i as u8);
                 }
             }
 
-            self.line_buf[x as usize] = pixel;
+            if self.display_obj && win_ctrl.display_obj {
+                let col = self.line_buf.obj[x];
+                if col & 0x8000 == 0 {
+                    // eprintln!(
+                    //     "x: {x} = {col:04X}, prio: {}",
+                    //     self.line_buf.obj_attr[x].priority()
+                    // );
+                    self.put_surface_pixel(x, col, self.line_buf.obj_attr[x].priority(), 4);
+                }
+            }
         }
     }
 
-    fn process_color_effect(&mut self) {
-        todo!();
+    fn put_surface_pixel(&mut self, x: usize, col: u16, priority: u8, attr: u8) {
+        if self.line_buf.surface_priority[0][x] > priority {
+            self.line_buf.surface[1][x] = self.line_buf.surface[0][x];
+            self.line_buf.surface_priority[1][x] = self.line_buf.surface_priority[0][x];
+            self.line_buf.surface_attr[1][x] = self.line_buf.surface_attr[0][x];
+
+            self.line_buf.surface[0][x] = col;
+            self.line_buf.surface_priority[0][x] = priority;
+            self.line_buf.surface_attr[0][x] = attr
+        } else if self.line_buf.surface_priority[1][x] > priority {
+            self.line_buf.surface[1][x] = col;
+            self.line_buf.surface_priority[1][x] = priority;
+            self.line_buf.surface_attr[1][x] = attr
+        }
+    }
+
+    fn color_special_effect(&mut self) {
+        let back_drop = self.bg_palette256(0);
+
+        eprintln!("Color special effect: backdrop: 0x{:04X}", back_drop);
+
+        for x in 0..VISIBLE_WIDTH {
+            let x = x as usize;
+            let (ty, col) = if self.line_buf.surface_priority[0][x] == 4 {
+                (0, back_drop)
+            } else if self.line_buf.surface[1][x] == 4 {
+                (1, self.line_buf.surface[0][x])
+            } else {
+                let c0 = self.line_buf.surface[0][x];
+                let c1 = self.line_buf.surface[1][x];
+                let a0 = self.line_buf.surface_attr[0][x];
+                let a1 = self.line_buf.surface_attr[1][x];
+
+                // TODO: overwrite effect by obj attr
+                // TODO: disable effect by window
+
+                match self.blend_ctrl.effect {
+                    // None
+                    0 => (2, c0),
+                    // Alpha belnding
+                    1 => {
+                        if self.blend_ctrl.target[0] & (1 << a0) != 0
+                            && self.blend_ctrl.target[1] & (1 << a1) != 0
+                        {
+                            (
+                                3,
+                                alpha_blend(c0, self.blend_ctrl.eva, c1, self.blend_ctrl.evb),
+                            )
+                        } else {
+                            (4, c0)
+                        }
+                    }
+                    // Brightness increase
+                    2 => {
+                        if self.blend_ctrl.target[0] & (1 << a0) != 0 {
+                            (5, brightness_increase(c0, self.blend_ctrl.evy))
+                        } else {
+                            (6, c0)
+                        }
+                    }
+                    // Brightness decrease
+                    3 => {
+                        if self.blend_ctrl.target[0] & (1 << a0) != 0 {
+                            (7, brightness_decrease(c0, self.blend_ctrl.evy))
+                        } else {
+                            (8, c0)
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            };
+
+            // eprint!("{ty}:{:04X} ", col);
+
+            self.line_buf.finished[x] = col;
+        }
+
+        eprintln!();
     }
 
     fn bg_palette256(&self, i: usize) -> u16 {
-        u16::from_le_bytes(self.palette[i * 2..i * 2 + 2].try_into().unwrap())
+        u16::from_le_bytes(self.palette[i * 2..i * 2 + 2].try_into().unwrap()) & 0x7FFF
     }
 
     fn bg_palette16(&self, i: usize, j: usize) -> u16 {
@@ -862,10 +1092,60 @@ impl Lcd {
     }
 }
 
+fn alpha_blend(a: u16, eva: u8, b: u16, evb: u8) -> u16 {
+    let ar = a & 0x1F;
+    let ag = (a >> 5) & 0x1F;
+    let ab = (a >> 10) & 0x1F;
+    let br = b & 0x1F;
+    let bg = (b >> 5) & 0x1F;
+    let bb = (b >> 10) & 0x1F;
+    let cr = alpha_blend_mono(ar, eva, br, evb);
+    let cg = alpha_blend_mono(ag, eva, bg, evb);
+    let cb = alpha_blend_mono(ab, eva, bb, evb);
+    (cb << 10) | (cg << 5) | cr
+}
+
+fn alpha_blend_mono(a: u16, eva: u8, b: u16, evb: u8) -> u16 {
+    min(31, (a * eva as u16 + b * evb as u16) / 16)
+}
+
+fn brightness_increase(c: u16, evy: u8) -> u16 {
+    let r = c & 0x1F;
+    let g = (c >> 5) & 0x1F;
+    let b = (c >> 10) & 0x1F;
+    let r = brightness_increase_mono(r, evy);
+    let g = brightness_increase_mono(g, evy);
+    let b = brightness_increase_mono(b, evy);
+    (b << 10) | (g << 5) | r
+}
+
+fn brightness_increase_mono(y: u16, evy: u8) -> u16 {
+    y + (31 - y) * evy as u16 / 16
+}
+
+fn brightness_decrease(c: u16, evy: u8) -> u16 {
+    let r = c & 0x1F;
+    let g = (c >> 5) & 0x1F;
+    let b = (c >> 10) & 0x1F;
+    let r = brightness_decrease_mono(r, evy);
+    let g = brightness_decrease_mono(g, evy);
+    let b = brightness_decrease_mono(b, evy);
+    (b << 10) | (g << 5) | r
+}
+
+fn brightness_decrease_mono(y: u16, evy: u8) -> u16 {
+    y - y * evy as u16 / 16
+}
+
 fn num_of_render_cycle(width: u32, rot: bool) -> u32 {
     if !rot {
         width
     } else {
         width * 2 + 10
     }
+}
+
+fn sign_extend(x: u32, sign: u32) -> i32 {
+    let shift = 31 - sign;
+    (x as i32) << shift >> shift
 }
