@@ -6,7 +6,13 @@ extern crate prettytable;
 use anyhow::{anyhow, bail, Result};
 use compress_tools::{list_archive_files, uncompress_archive_file};
 use log::info;
-use sdl2::{event::Event, keyboard::Keycode, pixels::Color, surface::Surface};
+use sdl2::{
+    event::Event,
+    keyboard::{KeyboardState, Keycode, Scancode},
+    pixels::Color,
+    surface::Surface,
+    EventPump,
+};
 use std::{
     fs::{read, File},
     io::Read,
@@ -15,7 +21,7 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
-use tgba_core::{Agb, Rom};
+use tgba_core::{Agb, KeyInput, Rom};
 
 const SCREEN_WIDTH: u32 = 240;
 const SCREEN_HEIGHT: u32 = 160;
@@ -71,6 +77,8 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
             }
         }
 
+        let key_input = get_key_input(&event_pump);
+        agb.set_key_input(&key_input);
         agb.run_frame();
         let frame_buf = agb.frame_buf();
 
@@ -94,6 +102,22 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn get_key_input(e: &EventPump) -> KeyInput {
+    let ks = KeyboardState::new(e);
+    KeyInput {
+        a: ks.is_scancode_pressed(Scancode::X),
+        b: ks.is_scancode_pressed(Scancode::Z),
+        select: ks.is_scancode_pressed(Scancode::RShift),
+        start: ks.is_scancode_pressed(Scancode::Return),
+        right: ks.is_scancode_pressed(Scancode::Right),
+        left: ks.is_scancode_pressed(Scancode::Left),
+        up: ks.is_scancode_pressed(Scancode::Up),
+        down: ks.is_scancode_pressed(Scancode::Down),
+        r: ks.is_scancode_pressed(Scancode::S),
+        l: ks.is_scancode_pressed(Scancode::A),
+    }
 }
 
 fn load_rom(file: &Path) -> Result<Rom> {

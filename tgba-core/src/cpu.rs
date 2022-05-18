@@ -278,6 +278,16 @@ impl<C: Context> Cpu<C> {
     }
 
     pub fn exec_one(&mut self, ctx: &mut C) {
+        // static mut PREV: u64 = 0;
+        // if ctx.now() - unsafe { PREV } > 10000 {
+        //     unsafe { PREV = ctx.now() };
+        //     trace!("HB: {}", ctx.now());
+        // }
+
+        // if ctx.now() > 77162629 {
+        //     self.trace = true;
+        // }
+
         if !self.regs.fiq_disable && ctx.interrupt().fiq() {
             ctx.interrupt_mut().set_halt(false);
             self.exception(Exception::FIQ);
@@ -405,13 +415,13 @@ fn build_arm_table<C: Context>() -> ([ArmOp<C>; 0x1000], [ArmDisasm; 0x1000]) {
     let mut op_tbl = [arm_op_invalid as ArmOp<C>; 0x1000];
     let mut disasm_tbl = [arm_disasm_invalid as ArmDisasm; 0x1000];
 
-    let invalid = |hi: usize, lo: usize| {
-        trace!(
-            "Invalid code: CCCC {:04b} {:04b} .... .... .... {:04b} ....",
-            hi >> 4,
-            hi & 0xF,
-            lo
-        );
+    let invalid = |_hi: usize, _lo: usize| {
+        // trace!(
+        //     "Invalid code: CCCC {:04b} {:04b} .... .... .... {:04b} ....",
+        //     hi >> 4,
+        //     hi & 0xF,
+        //     lo
+        // );
         arm_op_invalid
     };
 
@@ -419,38 +429,38 @@ fn build_arm_table<C: Context>() -> ([ArmOp<C>; 0x1000], [ArmDisasm; 0x1000]) {
         macro_rules! ldsth {
             ($t:ty) => {
                 match hi {
-                    0b00000 => arm_op_ldsth::<C, u16, false, false, false, false, false>,
-                    0b00001 => arm_op_ldsth::<C, u16, false, false, false, false, true>,
-                    0b00010 => arm_op_ldsth::<C, u16, false, false, false, true, false>,
-                    0b00011 => arm_op_ldsth::<C, u16, false, false, false, true, true>,
-                    0b00100 => arm_op_ldsth::<C, u16, false, false, true, false, false>,
-                    0b00101 => arm_op_ldsth::<C, u16, false, false, true, false, true>,
-                    0b00110 => arm_op_ldsth::<C, u16, false, false, true, true, false>,
-                    0b00111 => arm_op_ldsth::<C, u16, false, false, true, true, true>,
-                    0b01000 => arm_op_ldsth::<C, u16, false, true, false, false, false>,
-                    0b01001 => arm_op_ldsth::<C, u16, false, true, false, false, true>,
-                    0b01010 => arm_op_ldsth::<C, u16, false, true, false, true, false>,
-                    0b01011 => arm_op_ldsth::<C, u16, false, true, false, true, true>,
-                    0b01100 => arm_op_ldsth::<C, u16, false, true, true, false, false>,
-                    0b01101 => arm_op_ldsth::<C, u16, false, true, true, false, true>,
-                    0b01110 => arm_op_ldsth::<C, u16, false, true, true, true, false>,
-                    0b01111 => arm_op_ldsth::<C, u16, false, true, true, true, true>,
-                    0b10000 => arm_op_ldsth::<C, u16, true, false, false, false, false>,
-                    0b10001 => arm_op_ldsth::<C, u16, true, false, false, false, true>,
-                    0b10010 => arm_op_ldsth::<C, u16, true, false, false, true, false>,
-                    0b10011 => arm_op_ldsth::<C, u16, true, false, false, true, true>,
-                    0b10100 => arm_op_ldsth::<C, u16, true, false, true, false, false>,
-                    0b10101 => arm_op_ldsth::<C, u16, true, false, true, false, true>,
-                    0b10110 => arm_op_ldsth::<C, u16, true, false, true, true, false>,
-                    0b10111 => arm_op_ldsth::<C, u16, true, false, true, true, true>,
-                    0b11000 => arm_op_ldsth::<C, u16, true, true, false, false, false>,
-                    0b11001 => arm_op_ldsth::<C, u16, true, true, false, false, true>,
-                    0b11010 => arm_op_ldsth::<C, u16, true, true, false, true, false>,
-                    0b11011 => arm_op_ldsth::<C, u16, true, true, false, true, true>,
-                    0b11100 => arm_op_ldsth::<C, u16, true, true, true, false, false>,
-                    0b11101 => arm_op_ldsth::<C, u16, true, true, true, false, true>,
-                    0b11110 => arm_op_ldsth::<C, u16, true, true, true, true, false>,
-                    0b11111 => arm_op_ldsth::<C, u16, true, true, true, true, true>,
+                    0b00000 => arm_op_ldsth::<C, $t, false, false, false, false, false>,
+                    0b00001 => arm_op_ldsth::<C, $t, false, false, false, false, true>,
+                    0b00010 => arm_op_ldsth::<C, $t, false, false, false, true, false>,
+                    0b00011 => arm_op_ldsth::<C, $t, false, false, false, true, true>,
+                    0b00100 => arm_op_ldsth::<C, $t, false, false, true, false, false>,
+                    0b00101 => arm_op_ldsth::<C, $t, false, false, true, false, true>,
+                    0b00110 => arm_op_ldsth::<C, $t, false, false, true, true, false>,
+                    0b00111 => arm_op_ldsth::<C, $t, false, false, true, true, true>,
+                    0b01000 => arm_op_ldsth::<C, $t, false, true, false, false, false>,
+                    0b01001 => arm_op_ldsth::<C, $t, false, true, false, false, true>,
+                    0b01010 => arm_op_ldsth::<C, $t, false, true, false, true, false>,
+                    0b01011 => arm_op_ldsth::<C, $t, false, true, false, true, true>,
+                    0b01100 => arm_op_ldsth::<C, $t, false, true, true, false, false>,
+                    0b01101 => arm_op_ldsth::<C, $t, false, true, true, false, true>,
+                    0b01110 => arm_op_ldsth::<C, $t, false, true, true, true, false>,
+                    0b01111 => arm_op_ldsth::<C, $t, false, true, true, true, true>,
+                    0b10000 => arm_op_ldsth::<C, $t, true, false, false, false, false>,
+                    0b10001 => arm_op_ldsth::<C, $t, true, false, false, false, true>,
+                    0b10010 => arm_op_ldsth::<C, $t, true, false, false, true, false>,
+                    0b10011 => arm_op_ldsth::<C, $t, true, false, false, true, true>,
+                    0b10100 => arm_op_ldsth::<C, $t, true, false, true, false, false>,
+                    0b10101 => arm_op_ldsth::<C, $t, true, false, true, false, true>,
+                    0b10110 => arm_op_ldsth::<C, $t, true, false, true, true, false>,
+                    0b10111 => arm_op_ldsth::<C, $t, true, false, true, true, true>,
+                    0b11000 => arm_op_ldsth::<C, $t, true, true, false, false, false>,
+                    0b11001 => arm_op_ldsth::<C, $t, true, true, false, false, true>,
+                    0b11010 => arm_op_ldsth::<C, $t, true, true, false, true, false>,
+                    0b11011 => arm_op_ldsth::<C, $t, true, true, false, true, true>,
+                    0b11100 => arm_op_ldsth::<C, $t, true, true, true, false, false>,
+                    0b11101 => arm_op_ldsth::<C, $t, true, true, true, false, true>,
+                    0b11110 => arm_op_ldsth::<C, $t, true, true, true, true, false>,
+                    0b11111 => arm_op_ldsth::<C, $t, true, true, true, true, true>,
                     _ => unreachable!(),
                 }
             };
@@ -808,13 +818,13 @@ fn build_thumb_table<C: Context>() -> ([ThumbOp<C>; 0x400], [ThumbDisasm; 0x400]
     let mut op_tbl = [thumb_op_invalid as ThumbOp<C>; 0x400];
     let mut disasm_tbl = [thumb_disasm_invalid as ThumbDisasm; 0x400];
 
-    let invalid = |ix: usize| -> ThumbOp<C> {
-        trace!(
-            "Invalid thumb instruction {:04b} {:04b} {:02b}.. ....",
-            (ix >> 6),
-            (ix >> 2) & 0b1111,
-            ix & 0b11
-        );
+    let invalid = |_ix: usize| -> ThumbOp<C> {
+        // trace!(
+        //     "Invalid thumb instruction {:04b} {:04b} {:02b}.. ....",
+        //     (ix >> 6),
+        //     (ix >> 2) & 0b1111,
+        //     ix & 0b11
+        // );
         thumb_op_invalid
     };
 
@@ -952,28 +962,25 @@ fn build_thumb_table<C: Context>() -> ([ThumbOp<C>; 0x400], [ThumbDisasm; 0x400]
             };
             (op, thumb_disasm_ldstm)
         } else if (ix >> 6) == 0b1101 {
-            let op = match (ix >> 2) & 15 {
-                0 => thumb_op_cond_branch::<C, 0>,
-                1 => thumb_op_cond_branch::<C, 1>,
-                2 => thumb_op_cond_branch::<C, 2>,
-                3 => thumb_op_cond_branch::<C, 3>,
-                4 => thumb_op_cond_branch::<C, 4>,
-                5 => thumb_op_cond_branch::<C, 5>,
-                6 => thumb_op_cond_branch::<C, 6>,
-                7 => thumb_op_cond_branch::<C, 7>,
-                8 => thumb_op_cond_branch::<C, 8>,
-                9 => thumb_op_cond_branch::<C, 9>,
-                10 => thumb_op_cond_branch::<C, 10>,
-                11 => thumb_op_cond_branch::<C, 11>,
-                12 => thumb_op_cond_branch::<C, 12>,
-                13 => thumb_op_cond_branch::<C, 13>,
-                14 => thumb_op_cond_branch::<C, 14>,
-                15 => thumb_op_cond_branch::<C, 15>,
+            match (ix >> 2) & 15 {
+                0 => (thumb_op_cond_branch::<C, 0>, thumb_disasm_cond_branch),
+                1 => (thumb_op_cond_branch::<C, 1>, thumb_disasm_cond_branch),
+                2 => (thumb_op_cond_branch::<C, 2>, thumb_disasm_cond_branch),
+                3 => (thumb_op_cond_branch::<C, 3>, thumb_disasm_cond_branch),
+                4 => (thumb_op_cond_branch::<C, 4>, thumb_disasm_cond_branch),
+                5 => (thumb_op_cond_branch::<C, 5>, thumb_disasm_cond_branch),
+                6 => (thumb_op_cond_branch::<C, 6>, thumb_disasm_cond_branch),
+                7 => (thumb_op_cond_branch::<C, 7>, thumb_disasm_cond_branch),
+                8 => (thumb_op_cond_branch::<C, 8>, thumb_disasm_cond_branch),
+                9 => (thumb_op_cond_branch::<C, 9>, thumb_disasm_cond_branch),
+                10 => (thumb_op_cond_branch::<C, 10>, thumb_disasm_cond_branch),
+                11 => (thumb_op_cond_branch::<C, 11>, thumb_disasm_cond_branch),
+                12 => (thumb_op_cond_branch::<C, 12>, thumb_disasm_cond_branch),
+                13 => (thumb_op_cond_branch::<C, 13>, thumb_disasm_cond_branch),
+                14 => (thumb_op_cond_branch::<C, 14>, thumb_disasm_cond_branch),
+                15 => (thumb_op_swi, thumb_disasm_swi),
                 _ => unreachable!(),
-            };
-            (op, thumb_disasm_cond_branch)
-        } else if (ix >> 2) == 0b11011111 {
-            (thumb_op_swi, thumb_disasm_swi)
+            }
         } else if (ix >> 5) == 0b11100 {
             (thumb_op_b, thumb_disasm_b)
         } else if (ix >> 6) == 0b1111 {
@@ -1516,7 +1523,7 @@ fn arm_op_mul<C: Context, const A: bool, const S: bool>(
     };
 
     cpu.regs.r[rd] = res;
-    if !S {
+    if S {
         cpu.regs.set_nz(res);
     }
 }
@@ -1585,7 +1592,7 @@ fn arm_op_mull<C: Context, const U: bool, const A: bool, const S: bool>(
     cpu.regs.r[rdlo] = res as u32;
 
     if S {
-        cpu.regs.n_flag = res & 0x80000000 != 0;
+        cpu.regs.n_flag = (res >> 63) != 0;
         cpu.regs.z_flag = res == 0;
     }
 }
@@ -2819,6 +2826,8 @@ fn thumb_op_cond_branch<C: Context, const COND: usize>(cpu: &mut Cpu<C>, _ctx: &
 }
 
 fn thumb_disasm_cond_branch(instr: u16, pc: u32) -> String {
+    trace!("thumb_disasm_cond_branch: PC:{pc:08X}, instr:{instr:04X}");
+
     let cond = (instr >> 8) & 0xF;
     let offset = ((instr as i8) as i32 * 2 + 4) as u32;
     let dest = pc.wrapping_add(offset);
@@ -2858,6 +2867,7 @@ fn thumb_op_bl<C: Context, const H: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr:
         let offset = (instr & 0x7FF) as u32;
         let ret_addr = cpu.regs.r[15];
         let new_pc = cpu.regs.r[14].wrapping_add(offset * 2);
+        trace!("BL 0x{:08X}", new_pc);
         cpu.set_pc(new_pc);
         cpu.regs.r[14] = ret_addr | 1;
     }

@@ -1,10 +1,12 @@
 use std::{fmt::UpperHex, mem::size_of};
 
 use bitvec::prelude::*;
-use log::{info, trace, warn};
+use log::{info, log_enabled, trace, warn};
 
 use crate::{
     context::{Interrupt, Lcd, Sound, Timing},
+    interface::KeyInput,
+    interrupt::InterruptKind,
     rom::Rom,
     util::{pack, trait_alias},
 };
@@ -16,6 +18,7 @@ pub struct Bus {
     rom: Rom,
     ram: Vec<u8>,
     ext_ram: Vec<u8>,
+    gamepak_ram: Vec<u8>,
 
     dma: [Dma; 4],
     timer: [Timer; 4],
@@ -96,9 +99,9 @@ impl WaitCycles {
         }
 
         let ram_wait = game_pak_ram_wait_cycle(game_pak_ram_wait_ctrl as usize);
-        let mut gamepak_ram_8 = ram_wait;
-        let mut gamepak_ram_16 = ram_wait * 2;
-        let mut gamepak_ram_32 = ram_wait * 3;
+        let gamepak_ram_8 = ram_wait;
+        let gamepak_ram_16 = ram_wait * 2;
+        let gamepak_ram_32 = ram_wait * 3;
 
         WaitCycles {
             gamepak_rom_1st_8,
@@ -114,13 +117,15 @@ impl WaitCycles {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug)]
 struct Dma {
-    source_addr: u32,
-    dest_addr: u32,
-    word_count: u16,
+    ch: usize,
 
-    source_addr_ctrl: u8,
+    src_addr: u32,
+    dest_addr: u32,
+    word_count: u32,
+
+    src_addr_ctrl: u8,
     dest_addr_ctrl: u8,
     repeat: bool,
     transfer_type: bool, // 0: 16bit, 1: 32bit
@@ -129,10 +134,115 @@ struct Dma {
     // 00: Start immediately
     // 01: Start in a V-blank interval
     // 10: Start in an H-blank interval
-    // 11: Prohibited
+    // 11: Special
     start_timing: u8,
     irq_enable: bool,
     dma_enable: bool,
+
+    src_addr_internal: u32,
+    dest_addr_internal: u32,
+    word_count_internal: u32,
+
+    prev_dma_frame: u64,
+    prev_dma_line: u32,
+}
+
+enum StartTiming {
+    Immediately = 0,
+    VBlank = 1,
+    HBlank = 2,
+    Special = 3,
+}
+
+impl Dma {
+    fn new(ch: usize) -> Self {
+        Self {
+            ch,
+            src_addr: 0,
+            dest_addr: 0,
+            word_count: 0,
+            src_addr_ctrl: 0,
+            dest_addr_ctrl: 0,
+            repeat: false,
+            transfer_type: false,
+            game_pak_data_request_transfer: false,
+            start_timing: 0,
+            irq_enable: false,
+            dma_enable: false,
+
+            src_addr_internal: 0,
+            dest_addr_internal: 0,
+            word_count_internal: 0,
+
+            prev_dma_frame: 0,
+            prev_dma_line: 0,
+        }
+    }
+
+    fn repeat(&self) -> bool {
+        self.repeat
+            && (self.start_timing == StartTiming::VBlank as u8
+                || self.start_timing == StartTiming::HBlank as u8)
+    }
+
+    fn trace(&self) {
+        trace!("DMA{}:", self.ch);
+        trace!("  - enable: {}", if self.dma_enable { "yes" } else { "no" });
+        trace!(
+            "  - src:    0x{:08X}, {}",
+            self.src_addr,
+            match self.src_addr_ctrl {
+                0 => "inc",
+                1 => "dec",
+                2 => "fixed",
+                3 => "inc/reload",
+                _ => unreachable!(),
+            }
+        );
+        trace!(
+            "  - dest:   0x{:08X}, {}",
+            self.dest_addr,
+            match self.dest_addr_ctrl {
+                0 => "inc",
+                1 => "dec",
+                2 => "fixed",
+                3 => "prohibited",
+                _ => unreachable!(),
+            }
+        );
+        trace!(
+            "  - count:  0x{:X} * {}byte",
+            self.word_count,
+            if self.transfer_type { 4 } else { 2 }
+        );
+        trace!("  - repeat: {}", if self.repeat { "yes" } else { "no" });
+        if self.ch == 3 {
+            trace!(
+                "  - game pak DRQ: {}",
+                if !self.game_pak_data_request_transfer {
+                    "normal"
+                } else {
+                    "DRQ <from> Game Pak"
+                }
+            );
+        }
+        trace!(
+            "  - start:  {}",
+            match self.start_timing {
+                0 => "immediately",
+                1 => "VBlank",
+                2 => "HBlank",
+                3 => match self.ch {
+                    0 => "prohibited",
+                    1 | 2 => "Sound FIFO",
+                    3 => "Video capture",
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            }
+        );
+        trace!("  - IRQ:    {}", if self.irq_enable { "yes" } else { "no" });
+    }
 }
 
 #[derive(Default)]
@@ -200,6 +310,7 @@ impl Bus {
     pub fn new(bios: Vec<u8>, rom: Rom) -> Self {
         let ram = vec![0; 0x8000];
         let ext_ram = vec![0; 0x40000];
+        let gamepak_ram = vec![0; 0x10000];
 
         let mut reg_width_r = vec![0; 0x800];
         let mut reg_width_w = vec![0; 0x800];
@@ -229,11 +340,12 @@ impl Bus {
             rom,
             ram,
             ext_ram,
+            gamepak_ram,
 
-            dma: Default::default(),
+            dma: [0, 1, 2, 3].map(|ch| Dma::new(ch)),
             timer: Default::default(),
 
-            key_input: 0,
+            key_input: 0x3FF,
             key_interrupt_spec: 0,
             key_interrupt_enable: false,
             key_interrupt_cond: false,
@@ -256,6 +368,140 @@ impl Bus {
         }
     }
 
+    pub fn set_key_input(&mut self, key_input: &KeyInput) {
+        let v = self.key_input.view_bits_mut::<Lsb0>();
+        v.set(0, !key_input.a);
+        v.set(1, !key_input.b);
+        v.set(2, !key_input.select);
+        v.set(3, !key_input.start);
+        v.set(4, !key_input.right);
+        v.set(5, !key_input.left);
+        v.set(6, !key_input.up);
+        v.set(7, !key_input.down);
+        v.set(8, !key_input.r);
+        v.set(9, !key_input.l);
+
+        // TODO: key interrupt
+    }
+
+    pub fn tick(&mut self, ctx: &mut impl Context) {
+        for ch in 0..4 {
+            self.do_dma(ctx, ch);
+        }
+    }
+
+    fn check_dma_start(&mut self, ctx: &mut impl Context, ch: usize) -> bool {
+        match self.dma[ch].start_timing {
+            // Start immetiately
+            0 => true,
+            // Start in a V-blank interval
+            1 => self.dma[ch].prev_dma_frame != ctx.lcd().frame() && ctx.lcd().vblank(),
+            // Start in an H-blank interval
+            2 => {
+                let lcd = ctx.lcd();
+                lcd.hblank()
+                    && (self.dma[ch].prev_dma_frame, self.dma[ch].prev_dma_line)
+                        != (lcd.frame(), lcd.line())
+            }
+            3 => match ch {
+                // Prohibited
+                0 => false,
+                1 | 2 => {
+                    // TODO: Sound FIFO
+                    false
+                }
+                3 => {
+                    // TODO: Video capture
+                    false
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn do_dma(&mut self, ctx: &mut impl Context, ch: usize) {
+        if !self.dma[ch].dma_enable {
+            return;
+        }
+
+        if !self.check_dma_start(ctx, ch) {
+            return;
+        }
+
+        // The CPU is paused when DMA transfers are active, however, the CPU is operating during the periods when Sound/Blanking DMA transfers are paused.
+
+        // Transfer Rate/Timing
+        // Except for the first data unit, all units are transferred by sequential reads and writes. For n data units, the DMA transfer time is:
+
+        //   2N+2(n-1)S+xI
+        // Of which, 1N+(n-1)S are read cycles, and the other 1N+(n-1)S are write cycles, actual number of cycles depends on the waitstates and bus-width of the source and destination areas (as described in CPU Instruction Cycle Times chapter). Internal time for DMA processing is 2I (normally), or 4I (if both source and destination are in gamepak memory area).
+
+        self.dma[ch].prev_dma_frame = ctx.lcd().frame();
+        self.dma[ch].prev_dma_line = ctx.lcd().line();
+
+        let src_inc = match self.dma[ch].src_addr_ctrl {
+            // increment
+            0 => 4,
+            // decrement
+            1 => -4_i32 as u32,
+            // fixed
+            2 => 0,
+            // prohibited
+            3 => panic!(),
+            _ => unreachable!(),
+        };
+
+        let dest_inc = match self.dma[ch].dest_addr_ctrl {
+            // increment
+            0 => 4,
+            // decrement
+            1 => -4_i32 as u32,
+            // fixed
+            2 => 0,
+            // increment / reload
+            3 => 4,
+            _ => unreachable!(),
+        };
+
+        if log_enabled!(log::Level::Trace) {
+            self.dma[ch].trace();
+        }
+
+        for i in 0..self.dma[ch].word_count {
+            if self.dma[ch].transfer_type {
+                let data = self.read32(ctx, self.dma[ch].src_addr_internal, i == 0);
+                self.write32(ctx, self.dma[ch].dest_addr_internal, data, i == 0);
+            } else {
+                let data = self.read16(ctx, self.dma[ch].src_addr_internal, i == 0);
+                self.write16(ctx, self.dma[ch].dest_addr_internal, data, i == 0);
+            }
+
+            self.dma[ch].src_addr_internal = self.dma[ch].src_addr_internal.wrapping_add(src_inc);
+            self.dma[ch].dest_addr_internal =
+                self.dma[ch].dest_addr_internal.wrapping_add(dest_inc);
+        }
+
+        if !self.dma[ch].repeat() {
+            self.dma[ch].dma_enable = false;
+        } else if self.dma[ch].dest_addr_ctrl == 3 {
+            self.dma[ch].dest_addr_internal = self.dma[ch].dest_addr;
+        }
+
+        if self.dma[ch].irq_enable {
+            let kind = match ch {
+                0 => InterruptKind::Dma0,
+                1 => InterruptKind::Dma1,
+                2 => InterruptKind::Dma2,
+                3 => InterruptKind::Dma3,
+                _ => unreachable!(),
+            };
+            ctx.interrupt_mut().set_interrupt(kind);
+        }
+    }
+}
+
+impl Bus {
     pub fn read8(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> u8 {
         // trace!("Read8: 0x{addr:08X}");
 
@@ -265,7 +511,8 @@ impl Bus {
                 if addr < 0x00004000 {
                     self.bios[addr as usize]
                 } else {
-                    panic!()
+                    warn!("Invalid BIOS address read: 0x{addr:08X}:8");
+                    0
                 }
             }
             0x2 => {
@@ -306,7 +553,8 @@ impl Bus {
             }
 
             0xE..=0xF => {
-                todo!("GamePak RAM")
+                ctx.elapse(self.wait_cycles.gamepak_ram_8);
+                self.gamepak_ram[(addr & 0xFFFF) as usize]
             }
             _ => panic!(),
         }
@@ -321,7 +569,8 @@ impl Bus {
                     ctx.elapse(1);
                     read16(&self.bios, addr as usize)
                 } else {
-                    panic!()
+                    warn!("Invalid BIOS address read: 0x{addr:08X}:16");
+                    0
                 }
             }
             0x2 => {
@@ -372,7 +621,8 @@ impl Bus {
             }
 
             0xE..=0xF => {
-                todo!("GamePak RAM")
+                ctx.elapse(self.wait_cycles.gamepak_ram_16);
+                read16(&self.gamepak_ram, (addr & 0xFFFF) as usize)
             }
             _ => panic!(),
         }
@@ -387,7 +637,8 @@ impl Bus {
                     ctx.elapse(1);
                     read32(&self.bios, addr as usize)
                 } else {
-                    panic!()
+                    warn!("Invalid BIOS address read: 0x{addr:08X}:32");
+                    0
                 }
             }
             0x2 => {
@@ -441,7 +692,8 @@ impl Bus {
             }
 
             0xE..=0xF => {
-                todo!("GamePak RAM")
+                ctx.elapse(self.wait_cycles.gamepak_ram_32);
+                read32(&self.gamepak_ram, (addr & 0xFFFF) as usize)
             }
             _ => panic!(),
         }
@@ -453,7 +705,7 @@ impl Bus {
         match addr >> 24 {
             0x0..=0x1 => {
                 // FIXME: ???
-                panic!("Write to BIOS");
+                warn!("Write to BIOS");
             }
             0x2 => {
                 ctx.elapse(3);
@@ -471,13 +723,14 @@ impl Bus {
             }
 
             0x5 => panic!("Write 8bit data to Palette"),
-            0x6 => panic!("Write 8bit data to VRAM"),
+            0x6 => panic!("Write 8bit data to VRAM: cyc: {}", ctx.now()),
             0x7 => panic!("Write 8bit data to OAM"),
 
-            0x8..=0xD => panic!("Write 8bit data to ROM"),
+            0x8..=0xD => warn!("Write 8bit data to ROM"),
 
             0xE..=0xF => {
-                todo!("GamePak RAM")
+                ctx.elapse(self.wait_cycles.gamepak_ram_8);
+                self.gamepak_ram[(addr & 0xFFFF) as usize] = data;
             }
             _ => panic!(),
         }
@@ -488,7 +741,7 @@ impl Bus {
 
         match addr >> 24 {
             0x0..=0x1 => {
-                panic!("Write to BIOS");
+                warn!("Write to BIOS");
             }
             0x2 => {
                 ctx.elapse(3);
@@ -519,10 +772,11 @@ impl Bus {
                 write16(&mut ctx.lcd_mut().oam, (addr & 0x3FF) as usize, data);
             }
 
-            0x8..=0xD => panic!("Write 8bit data to ROM"),
+            0x8..=0xD => warn!("Write 16bit data to ROM"),
 
             0xE..=0xF => {
-                todo!("GamePak RAM")
+                ctx.elapse(self.wait_cycles.gamepak_ram_16);
+                write16(&mut self.gamepak_ram, (addr & 0xFFFF) as usize, data);
             }
             _ => panic!(),
         }
@@ -533,7 +787,7 @@ impl Bus {
 
         match addr >> 24 {
             0x0..=0x1 => {
-                panic!("Write to BIOS");
+                warn!("Write to BIOS");
             }
             0x2 => {
                 ctx.elapse(6);
@@ -566,10 +820,11 @@ impl Bus {
                 write32(&mut ctx.lcd_mut().oam, (addr & 0x3FF) as usize, data);
             }
 
-            0x8..=0xD => panic!("Write 8bit data to ROM"),
+            0x8..=0xD => warn!("Write 32bit data to ROM"),
 
             0xE..=0xF => {
-                todo!("GamePak RAM")
+                ctx.elapse(self.wait_cycles.gamepak_ram_32);
+                write32(&mut self.gamepak_ram, (addr & 0xFFFF) as usize, data);
             }
             _ => panic!("Write32: 0x{addr:08X} = 0x{data:08X}"),
         }
@@ -597,8 +852,15 @@ impl Bus {
             0x130 => self.key_input as u8,
             0x131 => (self.key_input >> 8) as u8,
 
+            // IME
+            0x208 => ctx.interrupt_mut().master_enable() as u8,
+            0x209 | 0x20A | 0x20B => 0,
+
             // POSTFLG
             0x300 => self.post_boot,
+
+            0xF600..=0xFFFF => 0,
+
             _ => todo!(
                 "IO read8: 0x{addr:03X} ({})",
                 get_io_reg(addr).map_or("N/A", |r| r.name)
@@ -610,6 +872,34 @@ impl Bus {
         match addr {
             0x000..=0x05E => ctx.lcd_read16(addr),
             0x060..=0x0AE => ctx.sound_read16(addr),
+
+            // DMAxCNT
+            0x0B8 | 0x0C4 | 0x0D0 | 0x0DC => {
+                let i = ((addr - 0x0B0) / 0xC) as usize;
+                let mask = if i != 3 { 0x3FFF } else { 0xFFFF };
+                (self.dma[i].word_count & mask) as u16
+            }
+            0x0BA | 0x0C6 | 0x0D2 | 0x0DE => {
+                let i = ((addr - 0x0B0) / 0xC) as usize;
+                let dma = &mut self.dma[i];
+                pack! {
+                    5..=6   => dma.dest_addr_ctrl,
+                    7..=8   => dma.src_addr_ctrl,
+                    9       => dma.repeat,
+                    10      => dma.transfer_type,
+                    11      => dma.game_pak_data_request_transfer,
+                    12..=13 => dma.start_timing,
+                    14      => dma.irq_enable,
+                    15      => dma.dma_enable,
+                }
+            }
+
+            // KEYCNT
+            0x132 => pack! {
+                0..=9 => self.key_interrupt_spec,
+                14    => self.key_interrupt_enable,
+                15    => self.key_interrupt_cond,
+            },
 
             // JOY_RECV
             0x150 => 0,
@@ -631,11 +921,13 @@ impl Bus {
                 15      => self.game_pak_type,
             },
 
-            0x130 => {
+            0x130 | 0x208 | 0x20A => {
                 let lo = self.io_read8(ctx, addr);
                 let hi = self.io_read8(ctx, addr + 1);
                 lo as u16 | ((hi as u16) << 8)
             }
+
+            0xF600..=0xFFFE => 0,
 
             _ => todo!(
                 "IO read16: 0x{addr:03X} ({})",
@@ -686,6 +978,15 @@ impl Bus {
 
             0x209 => {}
 
+            0xF600..=0xFFFF => {
+                let data = data as char;
+                if data == '\0' {
+                    println!();
+                } else if data.is_ascii_graphic() || data.is_ascii_whitespace() {
+                    print!("{data}");
+                }
+            }
+
             _ => todo!(
                 "IO write8: 0x{addr:03X} ({}) = 0x{data:02X}",
                 get_io_reg(addr).map_or("N/A", |r| r.name)
@@ -701,12 +1002,12 @@ impl Bus {
             // DMAxSAD
             0x0B0 | 0x0BC | 0x0C8 | 0x0D4 => {
                 let i = ((addr - 0x0B0) / 0xC) as usize;
-                self.dma[i].source_addr.view_bits_mut::<Lsb0>()[0..=15].store(data);
+                self.dma[i].src_addr.view_bits_mut::<Lsb0>()[0..=15].store(data);
             }
             0x0B2 | 0x0BE | 0x0CA | 0x0D6 => {
                 let i = ((addr - 0x0B0) / 0xC) as usize;
                 let hi = if i == 0 { 26 } else { 27 };
-                self.dma[i].source_addr.view_bits_mut::<Lsb0>()[16..=hi].store(data);
+                self.dma[i].src_addr.view_bits_mut::<Lsb0>()[16..=hi].store(data);
             }
 
             // DMAxDAD
@@ -724,7 +1025,8 @@ impl Bus {
             0x0B8 | 0x0C4 | 0x0D0 | 0x0DC => {
                 let i = ((addr - 0x0B0) / 0xC) as usize;
                 let mask = if i != 3 { 0x3FFF } else { 0xFFFF };
-                self.dma[i].word_count = data & mask;
+                let data = (data & mask) as u32;
+                self.dma[i].word_count = if data == 0 { mask as u32 + 1 } else { data };
             }
             0x0BA | 0x0C6 | 0x0D2 | 0x0DE => {
                 let i = ((addr - 0x0B0) / 0xC) as usize;
@@ -732,7 +1034,7 @@ impl Bus {
 
                 let v = data.view_bits::<Lsb0>();
                 dma.dest_addr_ctrl = v[5..=6].load();
-                dma.source_addr_ctrl = v[7..=8].load();
+                dma.src_addr_ctrl = v[7..=8].load();
                 dma.repeat = v[9];
                 dma.transfer_type = v[10];
                 if i == 3 {
@@ -740,6 +1042,14 @@ impl Bus {
                 }
                 dma.start_timing = v[12..=13].load();
                 dma.irq_enable = v[14];
+
+                if !dma.dma_enable && v[15] {
+                    // Reload src addr, dest addr and word count
+                    dma.src_addr_internal = dma.src_addr;
+                    dma.dest_addr_internal = dma.dest_addr;
+                    dma.word_count_internal = dma.word_count;
+                }
+
                 dma.dma_enable = v[15];
             }
 

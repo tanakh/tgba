@@ -3,6 +3,9 @@ use ambassador::{delegatable_trait, Delegate};
 
 #[delegatable_trait]
 pub trait Bus {
+    fn bus(&self) -> &bus::Bus;
+    fn bus_mut(&mut self) -> &mut bus::Bus;
+
     fn read8(&mut self, addr: u32, first: bool) -> u8;
     fn read16(&mut self, addr: u32, first: bool) -> u16;
     fn read32(&mut self, addr: u32, first: bool) -> u32;
@@ -10,6 +13,8 @@ pub trait Bus {
     fn write8(&mut self, addr: u32, data: u8, first: bool);
     fn write16(&mut self, addr: u32, data: u16, first: bool);
     fn write32(&mut self, addr: u32, data: u32, first: bool);
+
+    fn bus_tick(&mut self);
 }
 
 #[delegatable_trait]
@@ -88,6 +93,13 @@ pub struct Inner {
 }
 
 impl Bus for Inner {
+    fn bus(&self) -> &bus::Bus {
+        &self.bus
+    }
+    fn bus_mut(&mut self) -> &mut bus::Bus {
+        &mut self.bus
+    }
+
     fn read8(&mut self, addr: u32, first: bool) -> u8 {
         self.bus.read8(&mut self.inner, addr, first)
     }
@@ -106,6 +118,10 @@ impl Bus for Inner {
     }
     fn write32(&mut self, addr: u32, data: u32, first: bool) {
         self.bus.write32(&mut self.inner, addr, data, first)
+    }
+
+    fn bus_tick(&mut self) {
+        self.bus.tick(&mut self.inner);
     }
 }
 

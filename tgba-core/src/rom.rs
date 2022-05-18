@@ -42,7 +42,7 @@ impl Rom {
             .wrapping_add(0x19);
 
         if sum.wrapping_add(complement_check) != 0 {
-            bail!("Invalid complement check: {sum:02X} + {complement_check:02X} != 0",);
+            warn!("Invalid complement check: {sum:02X} + {complement_check:02X} != 0");
         }
 
         let ret = Rom {

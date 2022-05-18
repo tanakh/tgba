@@ -6,6 +6,7 @@ use log::{info, trace};
 use crate::{
     consts::{CLOCK_PER_DOT, SCREEN_HEIGHT, SCREEN_WIDTH, VISIBLE_HEIGHT, VISIBLE_WIDTH},
     context::{Interrupt, Timing},
+    interface::{FrameBuf, Pixel},
     interrupt::InterruptKind,
     util::{pack, trait_alias},
 };
@@ -54,64 +55,6 @@ pub struct Lcd {
 
     line_buf: LineBuf,
     frame_buf: FrameBuf,
-}
-
-#[derive(Clone)]
-pub struct Pixel {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-#[derive(Default)]
-pub struct FrameBuf {
-    width: u32,
-    height: u32,
-    buf: Vec<Pixel>,
-}
-
-impl FrameBuf {
-    pub fn new(width: u32, height: u32) -> Self {
-        FrameBuf {
-            width,
-            height,
-            buf: vec![Pixel::new(0, 0, 0); (width * height) as usize],
-        }
-    }
-
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    pub fn pixel(&self, x: u32, y: u32) -> &Pixel {
-        &self.buf[(y * self.width + x) as usize]
-    }
-
-    pub fn pixel_mut(&mut self, x: u32, y: u32) -> &mut Pixel {
-        &mut self.buf[(y * self.width + x) as usize]
-    }
-}
-
-impl Pixel {
-    pub fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
-    }
-
-    pub fn from_u16(p: u16) -> Self {
-        Self {
-            r: extend_color(p & 0x1F),
-            g: extend_color((p >> 5) & 0x1F),
-            b: extend_color((p >> 10) & 0x1F),
-        }
-    }
-}
-
-fn extend_color(col5: u16) -> u8 {
-    ((col5 << 3) | (col5 >> 2)) as u8
 }
 
 struct LineBuf {
@@ -229,6 +172,10 @@ impl Lcd {
         self.frame
     }
 
+    pub fn line(&self) -> u32 {
+        self.y
+    }
+
     pub fn frame_buf(&self) -> &FrameBuf {
         &self.frame_buf
     }
@@ -288,11 +235,11 @@ impl Lcd {
         }
     }
 
-    fn vblank(&self) -> bool {
+    pub fn vblank(&self) -> bool {
         self.y >= VISIBLE_HEIGHT
     }
 
-    fn hblank(&self) -> bool {
+    pub fn hblank(&self) -> bool {
         self.y < VISIBLE_HEIGHT && self.x >= VISIBLE_WIDTH
     }
 
@@ -339,6 +286,7 @@ impl Lcd {
                 self.display_window[1] = v[14];
                 self.display_obj_window = v[15];
             }
+            0x002 => {}
 
             // DISPSTAT
             0x004 => {
@@ -435,8 +383,6 @@ impl Lcd {
 
             // WININ / WINOUT
             0x048 | 0x04A => {
-                eprintln!("WININ/WINOUT: {addr:08X} = {data:04X}");
-
                 let v = data.view_bits::<Lsb0>();
                 for i in 0..2 {
                     let ctrl = if addr == 0x048 {
@@ -488,7 +434,7 @@ impl Lcd {
 
             0x056..=0x05E => {}
 
-            _ => todo!(),
+            _ => todo!("Write LCD register: 0x{addr:03X}"),
         }
     }
 }
@@ -510,7 +456,7 @@ impl Lcd {
         self.line_buf.surface_priority[0].fill(4);
         self.line_buf.surface_priority[1].fill(4);
 
-        eprintln!("Render line: y = {}, mode = {}", self.y, self.bg_mode);
+        trace!("Render line: y = {}, mode = {}", self.y, self.bg_mode);
 
         self.render_obj();
 
@@ -582,7 +528,61 @@ impl Lcd {
             return;
         }
 
-        todo!();
+        let hscrs = (1 + self.bg[i].screen_size % 2) as u32;
+        let vscrs = (1 + self.bg[i].screen_size / 2) as u32;
+
+        let screen_base_addr = self.bg[i].screen_base_block as usize * 0x800;
+        let char_base_addr = self.bg[i].char_base_block as usize * 0x4000;
+
+        let cy = self.bg[i].vofs as u32 + self.y;
+        let oy = cy % 8;
+        let by = cy / 8;
+
+        let scry = by / 32 % vscrs;
+        let by = by % 32;
+
+        for x in 0..VISIBLE_WIDTH {
+            let cx = self.bg[i].hofs as u32 + x;
+            let ox = cx % 8;
+            let bx = cx / 8;
+
+            let scrx = bx / 32 % hscrs;
+            let bx = bx % 32;
+
+            let scrid = scry * hscrs + scrx;
+            let screen_base_addr = screen_base_addr + scrid as usize * 0x800;
+            let block_addr = screen_base_addr + by as usize * 64 + bx as usize * 2;
+
+            let b0 = self.vram[screen_base_addr + block_addr];
+            let b1 = self.vram[screen_base_addr + block_addr + 1];
+
+            let char = b0 as usize + ((b1 as usize & 3) << 8);
+            let hflip = (b1 >> 2) & 1 != 0;
+            let vflip = (b1 >> 3) & 1 != 0;
+            let palette = b1 >> 4;
+
+            let ox = if !hflip { ox } else { 7 - ox } as usize;
+            let oy = if !vflip { oy } else { 7 - oy } as usize;
+
+            if !self.bg[i].color_mode {
+                // 16 x 16 color mode
+
+                assert!(char_base_addr + char * 32 + oy * 4 + ox / 2 < self.vram.len(), "too large index: char_base: {char_base_addr:08X}, char: 0x{char:03X}, ox: {ox}, oy: {oy}, b0: 0x{b0:02X}, b1: 0x{b1:02X}");
+
+                let col =
+                    self.vram[char_base_addr + char * 32 + oy * 4 + ox / 2] >> ((ox & 1) * 4) & 0xF;
+
+                if col != 0 {
+                    self.line_buf.bg[i][x as usize] = self.bg_palette16(palette as _, col as _);
+                }
+            } else {
+                // 256 x 1 color mode
+                let col = self.vram[char_base_addr + char * 64 + oy * 8 + ox];
+                if col != 0 {
+                    self.line_buf.bg[i][x as usize] = self.bg_palette256(col as _);
+                }
+            };
+        }
     }
 
     fn render_rotate_bg(&mut self, i: usize) {
@@ -605,15 +605,15 @@ impl Lcd {
         let dy = sign_extend(self.bg[i].dy as u32, 15);
         let dmy = sign_extend(self.bg[i].dmy as u32, 15);
 
-        eprintln!(
-            "BG{i}: size: {size}x{size}, refx: {refx}, refy: {refy}, dx = {dx}, dmx = {dmx}, dy = {dy}, dmy = {dmy}",
-            refx = sign_extend(self.bg[i].x, 27) as f64 / 256.0,
-            refy = sign_extend(self.bg[i].y, 27) as f64 / 256.0,
-            dx = dx as f64 / 256.0,
-            dmx = dmx as f64 / 256.0,
-            dy = dy as f64 / 256.0,
-            dmy = dmy as f64 / 256.0,
-        );
+        // eprintln!(
+        //     "BG{i}: size: {size}x{size}, refx: {refx}, refy: {refy}, dx = {dx}, dmx = {dmx}, dy = {dy}, dmy = {dmy}",
+        //     refx = sign_extend(self.bg[i].x, 27) as f64 / 256.0,
+        //     refy = sign_extend(self.bg[i].y, 27) as f64 / 256.0,
+        //     dx = dx as f64 / 256.0,
+        //     dmx = dmx as f64 / 256.0,
+        //     dy = dy as f64 / 256.0,
+        //     dmy = dmy as f64 / 256.0,
+        // );
 
         let mut cx = sign_extend(self.bg[i].x, 27) + self.y as i32 * dmx;
         let mut cy = sign_extend(self.bg[i].y, 27) + self.y as i32 * dmy;
@@ -760,15 +760,15 @@ impl Lcd {
                 continue;
             }
 
-            if (x, y, w, h) != (0, 0, 8, 8) {
-                eprintln!(
-                    "OBJ[{i:03}]: x: {x:3}, y: {y:3}, w: {w:3}, h: {h:3}, col: {col:3}, dim: {dim}, chr: 0x{char_name:03X}, type: {ty:4}, double: {dbl}",
-                    ty = if !rot { "norm" } else { "rot" },
-                    col = if color_256 {256} else {16},
-                    dim = if self.obj_format {1} else {2},
-                    dbl = if double {"y"} else {"n"},
-                );
-            }
+            // if (x, y, w, h) != (0, 0, 8, 8) {
+            //     eprintln!(
+            //         "OBJ[{i:03}]: x: {x:3}, y: {y:3}, w: {w:3}, h: {h:3}, col: {col:3}, dim: {dim}, chr: 0x{char_name:03X}, type: {ty:4}, double: {dbl}",
+            //         ty = if !rot { "norm" } else { "rot" },
+            //         col = if color_256 {256} else {16},
+            //         dim = if self.obj_format {1} else {2},
+            //         dbl = if double {"y"} else {"n"},
+            //     );
+            // }
 
             if !rot {
                 // Normal OBj
@@ -919,27 +919,27 @@ impl Lcd {
             && self.window[1].u as u32 <= self.y
             && self.y <= self.window[1].d as u32;
 
-        eprintln!("Eval priority:");
+        // eprintln!("Eval priority:");
 
-        for i in 0..2 {
-            eprintln!("  - Window {i}:");
-            eprintln!(
-                "    - region: ({}, {}) - ({}, {})",
-                self.window[i].l, self.window[i].u, self.window[i].r, self.window[i].d,
-            );
-            eprintln!("    - display: {}", self.display_window[i],);
-            eprintln!("    - ctrl: {:?}", self.winin[i]);
-        }
+        // for i in 0..2 {
+        //     eprintln!("  - Window {i}:");
+        //     eprintln!(
+        //         "    - region: ({}, {}) - ({}, {})",
+        //         self.window[i].l, self.window[i].u, self.window[i].r, self.window[i].d,
+        //     );
+        //     eprintln!("    - display: {}", self.display_window[i],);
+        //     eprintln!("    - ctrl: {:?}", self.winin[i]);
+        // }
 
-        eprintln!(" - Objwin:");
-        eprintln!("    - display: {}", self.display_obj_window);
-        eprintln!("    - ctrl: {:?}", self.objwin);
+        // eprintln!(" - Objwin:");
+        // eprintln!("    - display: {}", self.display_obj_window);
+        // eprintln!("    - ctrl: {:?}", self.objwin);
 
-        eprintln!(" - Winout:");
-        eprintln!("    - ctrl: {:?}", self.winout);
+        // eprintln!(" - Winout:");
+        // eprintln!("    - ctrl: {:?}", self.winout);
 
-        eprintln!("  - Display BG:  {:?}", self.display_bg,);
-        eprintln!("  - Display Obj: {}", self.display_obj);
+        // eprintln!("  - Display BG:  {:?}", self.display_bg,);
+        // eprintln!("  - Display Obj: {}", self.display_obj);
 
         let winout_enable =
             self.display_window[0] || self.display_window[1] || self.display_obj_window;
@@ -1014,7 +1014,7 @@ impl Lcd {
     fn color_special_effect(&mut self) {
         let back_drop = self.bg_palette256(0);
 
-        eprintln!("Color special effect: backdrop: 0x{:04X}", back_drop);
+        // eprintln!("Color special effect: backdrop: 0x{:04X}", back_drop);
 
         for x in 0..VISIBLE_WIDTH {
             let x = x as usize;
@@ -1067,12 +1067,8 @@ impl Lcd {
                 }
             };
 
-            // eprint!("{ty}:{:04X} ", col);
-
             self.line_buf.finished[x] = col;
         }
-
-        eprintln!();
     }
 
     fn bg_palette256(&self, i: usize) -> u16 {
