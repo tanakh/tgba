@@ -1168,24 +1168,18 @@ fn decode_op2<C: Context, const I: bool>(cpu: &mut Cpu<C>, instr: u32) -> (u32, 
     }
 }
 
-fn add_with_flag(a: u32, b: u32, c: bool) -> (u32, bool, bool) {
+fn add_with_carry(a: u32, b: u32, c: bool) -> (u32, bool, bool) {
     let (ret, carry1) = a.overflowing_add(b);
     let (ret, carry2) = ret.overflowing_add(c as u32);
-
-    let (tmp, overflow1) = (a as i32).overflowing_add(b as i32);
-    let (_, overflow2) = tmp.overflowing_add(c as i32);
-
-    (ret, carry1 || carry2, overflow1 || overflow2)
+    let overflow = (a ^ ret) & (b ^ ret) & 0x80000000 != 0;
+    (ret, carry1 || carry2, overflow)
 }
 
-fn sub_with_flag(a: u32, b: u32, c: bool) -> (u32, bool, bool) {
+fn sub_with_carry(a: u32, b: u32, c: bool) -> (u32, bool, bool) {
     let (ret, carry1) = a.overflowing_sub(b);
     let (ret, carry2) = ret.overflowing_sub(1 - c as u32);
-
-    let (tmp, overflow1) = (a as i32).overflowing_sub(b as i32);
-    let (_, overflow2) = tmp.overflowing_sub(1 - c as i32);
-
-    (ret, !(carry1 || carry2), overflow1 || overflow2)
+    let overflow = (a ^ b) & (a ^ ret) & 0x80000000 != 0;
+    (ret, !(carry1 || carry2), overflow)
 }
 
 fn alu<C: Context, const O: u8>(
@@ -1205,7 +1199,7 @@ fn alu<C: Context, const O: u8>(
             if !change_flag {
                 (op1.wrapping_sub(op2), false)
             } else {
-                let (ret, carry, overflow) = sub_with_flag(op1, op2, true);
+                let (ret, carry, overflow) = sub_with_carry(op1, op2, true);
                 cpu.regs.c_flag = carry;
                 cpu.regs.v_flag = overflow;
                 (ret, false)
@@ -1216,7 +1210,7 @@ fn alu<C: Context, const O: u8>(
             if !change_flag {
                 (op2.wrapping_sub(op1), false)
             } else {
-                let (ret, carry, overflow) = sub_with_flag(op2, op1, true);
+                let (ret, carry, overflow) = sub_with_carry(op2, op1, true);
                 cpu.regs.c_flag = carry;
                 cpu.regs.v_flag = overflow;
                 (ret, false)
@@ -1227,7 +1221,7 @@ fn alu<C: Context, const O: u8>(
             if !change_flag {
                 (op1.wrapping_add(op2), false)
             } else {
-                let (ret, carry, overflow) = add_with_flag(op1, op2, false);
+                let (ret, carry, overflow) = add_with_carry(op1, op2, false);
                 cpu.regs.c_flag = carry;
                 cpu.regs.v_flag = overflow;
                 (ret, false)
@@ -1238,7 +1232,7 @@ fn alu<C: Context, const O: u8>(
             if !change_flag {
                 (op1.wrapping_add(op2).wrapping_add(c_flag as u32), false)
             } else {
-                let (ret, carry, overflow) = add_with_flag(op1, op2, c_flag);
+                let (ret, carry, overflow) = add_with_carry(op1, op2, c_flag);
                 cpu.regs.c_flag = carry;
                 cpu.regs.v_flag = overflow;
                 (ret, false)
@@ -1250,7 +1244,7 @@ fn alu<C: Context, const O: u8>(
                 let borrow = 1 - cpu.regs.c_flag as u32;
                 (op1.wrapping_sub(op2).wrapping_sub(borrow), false)
             } else {
-                let (ret, carry, overflow) = sub_with_flag(op1, op2, c_flag);
+                let (ret, carry, overflow) = sub_with_carry(op1, op2, c_flag);
                 cpu.regs.c_flag = carry;
                 cpu.regs.v_flag = overflow;
                 (ret, false)
@@ -1262,7 +1256,7 @@ fn alu<C: Context, const O: u8>(
                 let borrow = 1 - cpu.regs.c_flag as u32;
                 (op2.wrapping_sub(op1).wrapping_sub(borrow), false)
             } else {
-                let (ret, carry, overflow) = sub_with_flag(op2, op1, c_flag);
+                let (ret, carry, overflow) = sub_with_carry(op2, op1, c_flag);
                 cpu.regs.c_flag = carry;
                 cpu.regs.v_flag = overflow;
                 (ret, false)
@@ -1274,14 +1268,14 @@ fn alu<C: Context, const O: u8>(
         0b1001 => (op1 ^ op2, true),
         // CMP
         0b1010 => {
-            let (ret, carry, overflow) = sub_with_flag(op1, op2, true);
+            let (ret, carry, overflow) = sub_with_carry(op1, op2, true);
             cpu.regs.c_flag = carry;
             cpu.regs.v_flag = overflow;
             (ret, true)
         }
         // CMN
         0b1011 => {
-            let (ret, carry, overflow) = add_with_flag(op1, op2, false);
+            let (ret, carry, overflow) = add_with_carry(op1, op2, false);
             cpu.regs.c_flag = carry;
             cpu.regs.v_flag = overflow;
             (ret, true)
