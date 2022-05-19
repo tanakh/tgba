@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Default)]
 pub struct FrameBuf {
     width: u32,
@@ -31,11 +33,17 @@ impl FrameBuf {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Pixel {
     pub r: u8,
     pub g: u8,
     pub b: u8,
+}
+
+impl fmt::Display for Pixel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#{:02X}{:02X}{:02X}", self.r, self.g, self.b)
+    }
 }
 
 impl Pixel {
@@ -56,7 +64,7 @@ fn extend_color(col5: u16) -> u8 {
     ((col5 << 3) | (col5 >> 2)) as u8
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct KeyInput {
     pub a: bool,
     pub b: bool,

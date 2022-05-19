@@ -1,4 +1,4 @@
-use std::{fmt::UpperHex, mem::size_of};
+use std::{cmp::min, fmt::UpperHex, mem::size_of};
 
 use bitvec::prelude::*;
 use log::{info, log_enabled, trace, warn};
@@ -22,6 +22,7 @@ pub struct Bus {
 
     dma: [Dma; 4],
     timer: [Timer; 4],
+    prev_cycle: u64,
 
     key_input: u16,
     key_interrupt_spec: u16,
@@ -258,6 +259,74 @@ struct Timer {
     // 10: System clock / 256
     // 11: System clock / 1024
     prescaler: u8,
+
+    fraction: u64,
+}
+
+impl Timer {
+    fn process(
+        &mut self,
+        ctx: &mut impl Context,
+        ch: usize,
+        elapsed: u64,
+        prev_overflow: u64,
+    ) -> u64 {
+        if !self.enable {
+            return 0;
+        }
+
+        let mut inc = if let Some(prescaler) = self.prescaler() {
+            self.fraction += elapsed;
+            let inc = self.fraction / prescaler;
+            self.fraction %= prescaler;
+            inc
+        } else {
+            prev_overflow
+        };
+
+        let mut overflow = 0;
+
+        while inc > 0 {
+            let t = min(inc, 0x10000 - self.counter as u64);
+
+            let (counter, o) = self.counter.overflowing_add(t as u16);
+            self.counter = counter;
+            if o {
+                overflow += 1;
+                self.counter = self.reload;
+                if self.irq_enable {
+                    let kind = match ch {
+                        0 => InterruptKind::Timer0,
+                        1 => InterruptKind::Timer1,
+                        2 => InterruptKind::Timer2,
+                        3 => InterruptKind::Timer3,
+                        _ => unreachable!(),
+                    };
+                    ctx.interrupt_mut().set_interrupt(kind);
+
+                    // TODO: FIFO request for ch0, 1
+                }
+            }
+
+            inc -= t;
+        }
+
+        overflow
+    }
+
+    fn prescaler(&self) -> Option<u64> {
+        if self.countup_timing {
+            None
+        } else {
+            Some(match self.prescaler {
+                0 => 1,
+                1 => 64,
+                2 => 256,
+                3 => 1024,
+                _ => unreachable!(),
+            })
+        }
+    }
 }
 
 #[derive(Default)]
@@ -344,6 +413,7 @@ impl Bus {
 
             dma: [0, 1, 2, 3].map(|ch| Dma::new(ch)),
             timer: Default::default(),
+            prev_cycle: 0,
 
             key_input: 0x3FF,
             key_interrupt_spec: 0,
@@ -386,7 +456,17 @@ impl Bus {
 
     pub fn tick(&mut self, ctx: &mut impl Context) {
         for ch in 0..4 {
-            self.do_dma(ctx, ch);
+            self.process_dma(ctx, ch);
+        }
+
+        let prev_cycle = self.prev_cycle;
+        let cur_cycle = ctx.now();
+        let elapsed = cur_cycle - prev_cycle;
+        self.prev_cycle = cur_cycle;
+
+        let mut prev_overflow = 0;
+        for ch in 0..4 {
+            prev_overflow = self.timer[ch].process(ctx, ch, elapsed, prev_overflow);
         }
     }
 
@@ -420,7 +500,7 @@ impl Bus {
         }
     }
 
-    fn do_dma(&mut self, ctx: &mut impl Context, ch: usize) {
+    fn process_dma(&mut self, ctx: &mut impl Context, ch: usize) {
         if !self.dma[ch].dma_enable {
             return;
         }
@@ -440,11 +520,13 @@ impl Bus {
         self.dma[ch].prev_dma_frame = ctx.lcd().frame();
         self.dma[ch].prev_dma_line = ctx.lcd().line();
 
+        let word_len = if self.dma[ch].transfer_type { 4 } else { 2 };
+
         let src_inc = match self.dma[ch].src_addr_ctrl {
             // increment
-            0 => 4,
+            0 => word_len,
             // decrement
-            1 => -4_i32 as u32,
+            1 => -(word_len as i32) as u32,
             // fixed
             2 => 0,
             // prohibited
@@ -454,9 +536,9 @@ impl Bus {
 
         let dest_inc = match self.dma[ch].dest_addr_ctrl {
             // increment
-            0 => 4,
+            0 => word_len,
             // decrement
-            1 => -4_i32 as u32,
+            1 => -(word_len as i32) as u32,
             // fixed
             2 => 0,
             // increment / reload
@@ -469,7 +551,7 @@ impl Bus {
         }
 
         for i in 0..self.dma[ch].word_count {
-            if self.dma[ch].transfer_type {
+            if word_len == 4 {
                 let data = self.read32(ctx, self.dma[ch].src_addr_internal, i == 0);
                 self.write32(ctx, self.dma[ch].dest_addr_internal, data, i == 0);
             } else {
@@ -531,9 +613,18 @@ impl Bus {
                 data
             }
 
-            0x5 => panic!("Read 8bit data from Palette"),
-            0x6 => panic!("Read 8bit data from VRAM"),
-            0x7 => panic!("Read 8bit data from OAM"),
+            0x5 => {
+                ctx.elapse(1);
+                ctx.lcd().palette[(addr & 0x3FF) as usize]
+            }
+            0x6 => {
+                ctx.elapse(1);
+                ctx.lcd().vram[vram_addr(addr)]
+            }
+            0x7 => {
+                ctx.elapse(1);
+                ctx.lcd().oam[(addr & 0x3FF) as usize]
+            }
 
             0x8..=0xD => {
                 let ix = (addr >> 25) as usize - 4;
@@ -722,9 +813,21 @@ impl Bus {
                 self.io_write8(ctx, addr & 0xFFFF, data);
             }
 
-            0x5 => panic!("Write 8bit data to Palette"),
-            0x6 => panic!("Write 8bit data to VRAM: cyc: {}", ctx.now()),
-            0x7 => panic!("Write 8bit data to OAM"),
+            0x5 => {
+                warn!("Write 8bit data to Palette: 0x{addr:08X} = 0x{data:02X}");
+                ctx.elapse(1);
+                ctx.lcd_mut().palette[(addr & 0x3FF) as usize] = data;
+            }
+            0x6 => {
+                warn!("Write 8bit data to VRAM: 0x{addr:08X} = 0x{data:02X}");
+                ctx.elapse(1);
+                ctx.lcd_mut().vram[vram_addr(addr)] = data;
+            }
+            0x7 => {
+                warn!("Write 8bit data to OAM: 0x{addr:08X} = 0x{data:02X}");
+                ctx.elapse(1);
+                ctx.lcd_mut().oam[(addr & 0x3FF) as usize] = data;
+            }
 
             0x8..=0xD => warn!("Write 8bit data to ROM"),
 
@@ -891,6 +994,23 @@ impl Bus {
                     12..=13 => dma.start_timing,
                     14      => dma.irq_enable,
                     15      => dma.dma_enable,
+                }
+            }
+
+            // TMxCNT_L
+            0x100 | 0x104 | 0x108 | 0x10C => {
+                let i = ((addr - 0x100) / 0x4) as usize;
+                self.timer[i].counter
+            }
+            // TMxCNT_H
+            0x102 | 0x106 | 0x10A | 0x10E => {
+                let i = ((addr - 0x100) / 0x4) as usize;
+                let timer = &mut self.timer[i];
+                pack! {
+                    0..=1   => timer.prescaler,
+                    2 => timer.countup_timing,
+                    6 => timer.irq_enable,
+                    7 => timer.enable,
                 }
             }
 
@@ -1070,6 +1190,7 @@ impl Bus {
                 timer.irq_enable = data[6];
                 if !timer.enable && data[7] {
                     timer.counter = timer.reload;
+                    timer.fraction = 0;
                 }
                 timer.enable = data[7];
             }

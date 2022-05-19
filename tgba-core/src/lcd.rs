@@ -247,8 +247,25 @@ impl Lcd {
         self.y == self.vcount as u32
     }
 
-    pub fn read16(&mut self, ctx: &mut impl Context, addr: u32) -> u16 {
+    pub fn read16(&mut self, _ctx: &mut impl Context, addr: u32) -> u16 {
         match addr {
+            // DISPCNT
+            0x000 => pack! {
+                0..=2 => self.bg_mode,
+                4 => self.display_frame_select,
+                5 => self.hblank_obj_process,
+                6 => self.obj_format,
+                7 => self.force_blank,
+                8 => self.display_bg[0],
+                9 => self.display_bg[1],
+                10 => self.display_bg[2],
+                11 => self.display_bg[3],
+                12 => self.display_obj,
+                13 => self.display_window[0],
+                14 => self.display_window[1],
+                15 => self.display_obj_window,
+            },
+
             // DISPSTAT
             0x004 => pack! {
                 0 => self.vblank(),
@@ -553,8 +570,13 @@ impl Lcd {
             let screen_base_addr = screen_base_addr + scrid as usize * 0x800;
             let block_addr = screen_base_addr + by as usize * 64 + bx as usize * 2;
 
-            let b0 = self.vram[screen_base_addr + block_addr];
-            let b1 = self.vram[screen_base_addr + block_addr + 1];
+            // assert!(
+            //     screen_base_addr + block_addr < self.vram.len(),
+            //     "screen_base_addr = {screen_base_addr:08X}, block_addr = {block_addr:08X}"
+            // );
+
+            let b0 = self.vram[block_addr];
+            let b1 = self.vram[block_addr + 1];
 
             let char = b0 as usize + ((b1 as usize & 3) << 8);
             let hflip = (b1 >> 2) & 1 != 0;
@@ -569,9 +591,8 @@ impl Lcd {
 
                 assert!(char_base_addr + char * 32 + oy * 4 + ox / 2 < self.vram.len(), "too large index: char_base: {char_base_addr:08X}, char: 0x{char:03X}, ox: {ox}, oy: {oy}, b0: 0x{b0:02X}, b1: 0x{b1:02X}");
 
-                let col =
-                    self.vram[char_base_addr + char * 32 + oy * 4 + ox / 2] >> ((ox & 1) * 4) & 0xF;
-
+                let tmp = self.vram[char_base_addr + char * 32 + oy * 4 + ox / 2];
+                let col = (tmp >> ((ox & 1) * 4)) & 0xF;
                 if col != 0 {
                     self.line_buf.bg[i][x as usize] = self.bg_palette16(palette as _, col as _);
                 }
@@ -912,34 +933,36 @@ impl Lcd {
     }
 
     fn eval_priority(&mut self) {
+        if self.y == 0 {
+            eprintln!("Eval priority:");
+
+            for i in 0..2 {
+                eprintln!("  - Window {i}:");
+                eprintln!(
+                    "    - region: ({}, {}) - ({}, {})",
+                    self.window[i].l, self.window[i].u, self.window[i].r, self.window[i].d,
+                );
+                eprintln!("    - display: {}", self.display_window[i],);
+                eprintln!("    - ctrl: {:?}", self.winin[i]);
+            }
+
+            eprintln!(" - Objwin:");
+            eprintln!("    - display: {}", self.display_obj_window);
+            eprintln!("    - ctrl: {:?}", self.objwin);
+
+            eprintln!(" - Winout:");
+            eprintln!("    - ctrl: {:?}", self.winout);
+
+            eprintln!("  - Display BG:  {:?}", self.display_bg,);
+            eprintln!("  - Display Obj: {}", self.display_obj);
+        }
+
         let y_in_win0 = self.display_window[0]
             && self.window[0].u as u32 <= self.y
             && self.y <= self.window[0].d as u32;
         let y_in_win1 = self.display_window[1]
             && self.window[1].u as u32 <= self.y
             && self.y <= self.window[1].d as u32;
-
-        // eprintln!("Eval priority:");
-
-        // for i in 0..2 {
-        //     eprintln!("  - Window {i}:");
-        //     eprintln!(
-        //         "    - region: ({}, {}) - ({}, {})",
-        //         self.window[i].l, self.window[i].u, self.window[i].r, self.window[i].d,
-        //     );
-        //     eprintln!("    - display: {}", self.display_window[i],);
-        //     eprintln!("    - ctrl: {:?}", self.winin[i]);
-        // }
-
-        // eprintln!(" - Objwin:");
-        // eprintln!("    - display: {}", self.display_obj_window);
-        // eprintln!("    - ctrl: {:?}", self.objwin);
-
-        // eprintln!(" - Winout:");
-        // eprintln!("    - ctrl: {:?}", self.winout);
-
-        // eprintln!("  - Display BG:  {:?}", self.display_bg,);
-        // eprintln!("  - Display Obj: {}", self.display_obj);
 
         let winout_enable =
             self.display_window[0] || self.display_window[1] || self.display_obj_window;

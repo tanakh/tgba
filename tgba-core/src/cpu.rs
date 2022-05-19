@@ -284,7 +284,7 @@ impl<C: Context> Cpu<C> {
         //     trace!("HB: {}", ctx.now());
         // }
 
-        // if ctx.now() > 77162629 {
+        // if ctx.now() > 77724416 - 100 {
         //     self.trace = true;
         // }
 
@@ -1711,11 +1711,16 @@ fn arm_op_ldst<
     let addr = if P { ea } else { base };
 
     if L {
-        if B {
-            cpu.regs.r[rd] = u8::load(ctx, addr, true);
+        let data = if B {
+            u8::load(ctx, addr, true)
         } else {
-            cpu.regs.r[rd] = u32::load(ctx, addr, true);
+            u32::load(ctx, addr, true)
         };
+        if rd != 15 {
+            cpu.regs.r[rd] = data;
+        } else {
+            cpu.set_pc(data);
+        }
     } else {
         // When R15 is the source register (Rd) of a register store (STR) instruction,
         // the stored value will be address of the instruction plus 12.
@@ -1841,7 +1846,12 @@ fn arm_op_ldsth<
     let addr = if P { ea } else { base };
 
     if L {
-        cpu.regs.r[rd] = T::load(ctx, addr, true);
+        let data = T::load(ctx, addr, true);
+        if rd != 15 {
+            cpu.regs.r[rd] = data;
+        } else {
+            cpu.set_pc(data);
+        }
     } else {
         // When R15 is the source register (Rd) of a register store (STR) instruction,
         // the stored value will be address of the instruction plus 12.
@@ -2867,7 +2877,6 @@ fn thumb_op_bl<C: Context, const H: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr:
         let offset = (instr & 0x7FF) as u32;
         let ret_addr = cpu.regs.r[15];
         let new_pc = cpu.regs.r[14].wrapping_add(offset * 2);
-        trace!("BL 0x{:08X}", new_pc);
         cpu.set_pc(new_pc);
         cpu.regs.r[14] = ret_addr | 1;
     }

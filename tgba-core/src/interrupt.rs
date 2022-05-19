@@ -33,7 +33,7 @@ impl Interrupt {
     }
 
     pub fn irq(&self) -> bool {
-        self.master_enable && (self.request & self.request) != 0
+        self.master_enable && (self.enable & self.request) != 0
     }
 
     pub fn fiq(&self) -> bool {

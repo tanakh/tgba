@@ -8,7 +8,7 @@ use compress_tools::{list_archive_files, uncompress_archive_file};
 use log::info;
 use sdl2::{
     event::Event,
-    keyboard::{KeyboardState, Keycode, Scancode},
+    keyboard::{Keycode, Scancode},
     pixels::Color,
     surface::Surface,
     EventPump,
@@ -17,7 +17,6 @@ use std::{
     fs::{read, File},
     io::Read,
     path::Path,
-    time::Duration,
 };
 use tempfile::NamedTempFile;
 
@@ -46,13 +45,15 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
         .build()
         .unwrap();
 
-    let mut canvas = window.into_canvas().build().unwrap();
+    let mut canvas = window.into_canvas().present_vsync().build().unwrap();
 
-    canvas.set_draw_color(Color::RGB(0, 255, 255));
-    canvas.clear();
-    canvas.present();
+    // sdl_context
+    //     .event()
+    //     .unwrap()
+    //     .flush_event(sdl2::event::EventType::KeyDown);
+
+    canvas.set_draw_color(Color::RGB(0, 0, 0));
     let mut event_pump = sdl_context.event_pump().unwrap();
-    let mut i = 0;
 
     let texture_creator = canvas.texture_creator();
     let mut surface = Surface::new(
@@ -62,22 +63,11 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
     )
     .unwrap();
 
-    'running: loop {
-        i = (i + 1) % 255;
-        canvas.set_draw_color(Color::RGB(0, 0, 0));
-        canvas.clear();
-        for event in event_pump.poll_iter() {
-            match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => break 'running,
-                _ => {}
-            }
-        }
+    let mut prev_time = std::time::Instant::now();
 
+    while process_events(&mut event_pump) {
         let key_input = get_key_input(&event_pump);
+        eprintln!("Key input: {key_input:?}");
         agb.set_key_input(&key_input);
         agb.run_frame();
         let frame_buf = agb.frame_buf();
@@ -98,14 +88,40 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
         canvas.copy(&texture, None, None).unwrap();
 
         canvas.present();
-        std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+
+        let now = std::time::Instant::now();
+
+        let elapsed = now - prev_time;
+        let wait = std::time::Duration::from_nanos(1_000_000_000u64 / 60);
+        if wait > elapsed {
+            std::thread::sleep(wait - elapsed);
+        }
     }
 
     Ok(())
 }
 
+fn process_events(event_pump: &mut EventPump) -> bool {
+    for event in event_pump.poll_iter() {
+        match event {
+            Event::Quit { .. }
+            | Event::KeyDown {
+                keycode: Some(Keycode::Escape),
+                ..
+            } => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
 fn get_key_input(e: &EventPump) -> KeyInput {
-    let ks = KeyboardState::new(e);
+    let ks = e.keyboard_state();
+
+    for k in ks.pressed_scancodes() {
+        eprintln!("* {k:?}");
+    }
+
     KeyInput {
         a: ks.is_scancode_pressed(Scancode::X),
         b: ks.is_scancode_pressed(Scancode::Z),
@@ -162,8 +178,6 @@ fn dump_rom_info(rom: &Rom) {
         ["Device Type", rom.device_type],
         ["ROM Version", rom.rom_version]
     };
-
     table.set_format(*prettytable::format::consts::FORMAT_NO_LINESEP_WITH_TITLE);
-
     table.printstd();
 }
