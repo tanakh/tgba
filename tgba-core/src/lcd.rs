@@ -265,6 +265,7 @@ impl Lcd {
                 14 => self.display_window[1],
                 15 => self.display_obj_window,
             },
+            0x002 => 0,
 
             // DISPSTAT
             0x004 => pack! {
@@ -280,11 +281,95 @@ impl Lcd {
             // VCOUNT
             0x006 => self.y as u16,
 
-            _ => todo!("LCD read {addr:03X}"),
+            // BGxCNT
+            0x008 | 0x00A | 0x00C | 0x00E => {
+                let i = ((addr - 0x008) / 2) as usize;
+                let bg_ctrl = &mut self.bg[i];
+                pack! {
+                    0..=1   => bg_ctrl.priority,
+                    2..=3   => bg_ctrl.char_base_block,
+                    4..=5   => !0,
+                    6       => bg_ctrl.mosaic,
+                    7       => bg_ctrl.color_mode,
+                    8..=12  => bg_ctrl.screen_base_block,
+                    13      => bg_ctrl.area_overflow_processing,
+                    14..=15 => bg_ctrl.screen_size,
+                }
+            }
+
+            // BGxHOFS
+            0x010 | 0x014 | 0x018 | 0x01C => 0,
+            // BGxVOFS
+            0x012 | 0x016 | 0x01A | 0x01E => 0,
+            // BGxPA
+            0x020 | 0x030 => 0,
+            // BGxPB
+            0x022 | 0x032 => 0,
+            // BGxPC
+            0x024 | 0x034 => 0,
+            // BGxPD
+            0x026 | 0x036 => 0,
+
+            // BGxX
+            0x028 | 0x038 => 0,
+            0x02A | 0x03A => 0,
+            // BGxY
+            0x02C | 0x03C => 0,
+            0x02E | 0x03E => 0,
+
+            // WINxH
+            0x040 | 0x042 => 0,
+            // WINxV
+            0x044 | 0x046 => 0,
+
+            // WININ / WINOUT
+            0x048 | 0x04A => {
+                let mut data = 0;
+                let v = data.view_bits_mut::<Lsb0>();
+                for i in 0..2 {
+                    let ctrl = if addr == 0x048 {
+                        &mut self.winin[i]
+                    } else {
+                        if i == 0 {
+                            &mut self.winout
+                        } else {
+                            &mut self.objwin
+                        }
+                    };
+
+                    for j in 0..4 {
+                        v.set(i * 8 + j, ctrl.display_bg[j]);
+                    }
+                    v.set(i * 8 + 4, ctrl.display_obj);
+                    v.set(i * 8 + 5, ctrl.color_special_effect);
+                }
+                data
+            }
+
+            // MOSAIC
+            0x04C | 0x04E => 0,
+
+            // BLDCNT
+            0x050 => pack! {
+                6..=7  => self.blend_ctrl.effect,
+                0..=5  => self.blend_ctrl.target[0],
+                8..=13 => self.blend_ctrl.target[1],
+            },
+            // BLDALPHA
+            0x052 => pack! {
+                0..=4  => self.blend_ctrl.eva,
+                8..=12 => self.blend_ctrl.evb,
+            },
+            // BLDY
+            0x054 => 0,
+
+            0x056..=0x05E => 0,
+
+            _ => unreachable!("{addr:03X}"),
         }
     }
 
-    pub fn write16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
+    pub fn write16(&mut self, _ctx: &mut impl Context, addr: u32, data: u16) {
         match addr {
             // DISPCNT
             0x000 => {
@@ -320,17 +405,17 @@ impl Lcd {
             // BGxCNT
             0x008 | 0x00A | 0x00C | 0x00E => {
                 let i = ((addr - 0x008) / 2) as usize;
-                let bg_cntl = &mut self.bg[i];
+                let bg_ctrl = &mut self.bg[i];
                 let v = data.view_bits::<Lsb0>();
-                bg_cntl.priority = v[0..=1].load();
-                bg_cntl.char_base_block = v[2..=3].load();
-                bg_cntl.mosaic = v[6];
-                bg_cntl.color_mode = v[7];
-                bg_cntl.screen_base_block = v[8..=12].load();
+                bg_ctrl.priority = v[0..=1].load();
+                bg_ctrl.char_base_block = v[2..=3].load();
+                bg_ctrl.mosaic = v[6];
+                bg_ctrl.color_mode = v[7];
+                bg_ctrl.screen_base_block = v[8..=12].load();
                 if i == 2 || i == 3 {
-                    bg_cntl.area_overflow_processing = v[13];
+                    bg_ctrl.area_overflow_processing = v[13];
                 }
-                bg_cntl.screen_size = v[14..=15].load();
+                bg_ctrl.screen_size = v[14..=15].load();
             }
 
             // BGxHOFS
@@ -451,7 +536,7 @@ impl Lcd {
 
             0x056..=0x05E => {}
 
-            _ => todo!("Write LCD register: 0x{addr:03X}"),
+            _ => unreachable!(),
         }
     }
 }
@@ -760,7 +845,9 @@ impl Lcd {
                 [(8, 16), (8, 32), (16, 32), (32, 64)],
             ];
 
-            let (w, h) = OBJ_SIZE_TBL[shape as usize][size as usize];
+            let (ow, oh) = OBJ_SIZE_TBL[shape as usize][size as usize];
+            let w = ow * if double { 2 } else { 1 };
+            let h = oh * if double { 2 } else { 1 };
 
             let char_name = oam[4] as u32 | (oam[5] as u32 & 3) << 8;
 
@@ -791,14 +878,15 @@ impl Lcd {
             //     );
             // }
 
+            let rely = self.y - y_range.0;
+
             if !rot {
                 // Normal OBj
 
                 let hflip = oam[3] & 0x10 != 0;
                 let vflip = oam[3] & 0x20 != 0;
 
-                let dy = self.y - y_range.0;
-                let dy = if !vflip { dy } else { h - 1 - dy };
+                let dy = if !vflip { rely } else { h - 1 - rely };
 
                 if !color_256 {
                     let palette_num = oam[5] >> 4;
@@ -807,16 +895,16 @@ impl Lcd {
                         // 2-dim
                         let l_char = char_name + (dy / 8) * 32;
 
-                        for dx in 0..w {
-                            let cx = ((x + dx) % 512) as usize;
+                        for relx in 0..w {
+                            let cx = ((x + relx) % 512) as usize;
                             if cx >= 240 {
                                 continue;
                             }
 
-                            let dx = if !hflip { dx } else { w - 1 - dx };
+                            let dx = if !hflip { relx } else { w - 1 - relx };
                             let bx = dx / 8;
                             let ox = dx % 8;
-                            let addr = (l_char + bx * 2) * 32 + (dy % 8) * 4 + ox / 2;
+                            let addr = (l_char + bx) * 32 + (dy % 8) * 4 + ox / 2;
                             let col_num =
                                 (self.vram[(obj_base_addr + addr) as usize] >> (ox % 2 * 4)) & 0xf;
                             self.put_obj_pixel16(cx, palette_num, col_num, mode, priority);
@@ -825,13 +913,13 @@ impl Lcd {
                         // 1-dim
                         let l_char = char_name + (dy / 8) * (w / 8);
 
-                        for dx in 0..w {
-                            let cx = ((x + dx) % 512) as usize;
+                        for relx in 0..w {
+                            let cx = ((x + relx) % 512) as usize;
                             if cx >= 240 {
                                 continue;
                             }
 
-                            let dx = if !hflip { dx } else { w - 1 - dx };
+                            let dx = if !hflip { relx } else { w - 1 - relx };
                             let bx = dx / 8;
                             let ox = dx % 8;
                             let addr = (l_char + bx) * 32 + (dy % 8) * 4 + ox / 2;
@@ -867,28 +955,125 @@ impl Lcd {
                         todo!();
                     }
                 }
+            } else {
+                let rot_param_num = (oam[3] >> 1) & 0x1F;
+                let rot_param_base = rot_param_num as usize * 32;
+                let rot_param = &self.oam[rot_param_base..rot_param_base + 32];
+                let dx = i16::from_le_bytes(rot_param[6..8].try_into().unwrap()) as i32;
+                let dmx = i16::from_le_bytes(rot_param[14..16].try_into().unwrap()) as i32;
+                let dy = i16::from_le_bytes(rot_param[22..24].try_into().unwrap()) as i32;
+                let dmy = i16::from_le_bytes(rot_param[30..32].try_into().unwrap()) as i32;
 
-                // for Debugging
-                if self.y == y_range.0 || self.y + 1 == y_range.1 {
-                    for dx in 0..w {
-                        let cx = ((x + dx) % 512) as usize;
-                        if cx >= 240 {
-                            continue;
+                if !color_256 {
+                    let palette_num = oam[5] >> 4;
+
+                    if !self.obj_format {
+                        // 2-dim
+
+                        let tx = char_name % 32;
+                        let ty = char_name / 32;
+
+                        let mut rx = (ow as i32 / 2) << 8;
+                        let mut ry = (oh as i32 / 2) << 8;
+
+                        let rdx = -(w as i32 / 2);
+                        rx += dx * rdx;
+                        ry += dy * rdx;
+
+                        let rdy = rely as i32 - (h as i32 / 2);
+                        rx += dmx * rdy;
+                        ry += dmy * rdy;
+
+                        for i in 0..w {
+                            let sx = ((x + i) % 512) as usize;
+                            if sx >= 240 {
+                                continue;
+                            }
+
+                            let rx2 = (rx + dx * i as i32) >> 8;
+                            let ry2 = (ry + dy * i as i32) >> 8;
+
+                            if !(rx2 >= 0 && rx2 < ow as i32 && ry2 >= 0 && ry2 < oh as i32) {
+                                continue;
+                            }
+
+                            let rx2 = rx2 as u32;
+                            let ry2 = ry2 as u32;
+
+                            let tile_num = (ty + ry2 / 8) * 32 + tx + rx2 / 8;
+                            let addr = tile_num * 32 + (ry2 % 8) * 4 + rx2 % 8 / 2;
+                            let col_num =
+                                (self.vram[(obj_base_addr + addr) as usize] >> (rx2 % 2 * 4)) & 0xf;
+                            self.put_obj_pixel16(sx, palette_num, col_num, mode, priority);
                         }
-                        self.put_obj_pixel256(cx, 1, mode, priority);
+                    } else {
+                        // 1-dim
+
+                        todo!();
+                    }
+                } else {
+                    if !self.obj_format {
+                        // 2-dim
+
+                        let tx = (char_name % 32) & !1;
+                        let ty = char_name / 32;
+
+                        let mut rx = (ow as i32 / 2) << 8;
+                        let mut ry = (oh as i32 / 2) << 8;
+
+                        let rdx = -(w as i32 / 2);
+                        rx += dx * rdx;
+                        ry += dy * rdx;
+
+                        let rdy = rely as i32 - (h as i32 / 2);
+                        rx += dmx * rdy;
+                        ry += dmy * rdy;
+
+                        for i in 0..w {
+                            let sx = ((x + i) % 512) as usize;
+                            if sx >= 240 {
+                                continue;
+                            }
+
+                            let rx2 = (rx + dx * i as i32) >> 8;
+                            let ry2 = (ry + dy * i as i32) >> 8;
+
+                            if !(rx2 >= 0 && rx2 < ow as i32 && ry2 >= 0 && ry2 < oh as i32) {
+                                continue;
+                            }
+
+                            let rx2 = rx2 as u32;
+                            let ry2 = ry2 as u32;
+
+                            let tile_num = (ty + ry2 / 8) * 32 + tx + rx2 / 8 * 2;
+                            let addr = tile_num * 32 + (ry2 % 8) * 8 + rx2 % 8;
+                            let col_num = self.vram[(obj_base_addr + addr) as usize];
+                            self.put_obj_pixel256(sx, col_num, mode, priority);
+                        }
+                    } else {
+                        // 1-dim
+
+                        todo!();
                     }
                 }
-                if x < 240 {
-                    self.put_obj_pixel256(x as _, 1, mode, priority);
-                }
-                if (x + w - 1) % 512 < 240 {
-                    self.put_obj_pixel256(((x + w - 1) % 512) as _, 1, mode, priority);
-                }
-            } else {
-                // todo!("Rotate/Scaling Obj");
-
-                let rot_param = (oam[3] >> 1) & 0x1F;
             }
+
+            // // for Debugging
+            // if self.y == y_range.0 || self.y + 1 == y_range.1 {
+            //     for dx in 0..w {
+            //         let cx = ((x + dx) % 512) as usize;
+            //         if cx >= 240 {
+            //             continue;
+            //         }
+            //         self.put_obj_pixel256(cx, 1, mode, priority);
+            //     }
+            // }
+            // if x < 240 {
+            //     self.put_obj_pixel256(x as _, 1, mode, priority);
+            // }
+            // if (x + w - 1) % 512 < 240 {
+            //     self.put_obj_pixel256(((x + w - 1) % 512) as _, 1, mode, priority);
+            // }
 
             // TODO: how many cycles for invisible objs?
             avail_cycle -= min(avail_cycle, num_of_render_cycle(w, rot));
@@ -994,17 +1179,6 @@ impl Lcd {
 
             let x = x as usize;
 
-            for i in 0..4 {
-                if !(self.display_bg[i] && win_ctrl.display_bg[i]) {
-                    continue;
-                }
-
-                let col = self.line_buf.bg[i][x];
-                if col & 0x8000 == 0 {
-                    self.put_surface_pixel(x, col, self.bg[i].priority, i as u8);
-                }
-            }
-
             if self.display_obj && win_ctrl.display_obj {
                 let col = self.line_buf.obj[x];
                 if col & 0x8000 == 0 {
@@ -1013,6 +1187,17 @@ impl Lcd {
                     //     self.line_buf.obj_attr[x].priority()
                     // );
                     self.put_surface_pixel(x, col, self.line_buf.obj_attr[x].priority(), 4);
+                }
+            }
+
+            for i in 0..4 {
+                if !(self.display_bg[i] && win_ctrl.display_bg[i]) {
+                    continue;
+                }
+
+                let col = self.line_buf.bg[i][x];
+                if col & 0x8000 == 0 {
+                    self.put_surface_pixel(x, col, self.bg[i].priority, i as u8);
                 }
             }
         }

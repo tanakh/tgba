@@ -7,7 +7,7 @@ use crate::{
     context::{Interrupt, Lcd, Sound, Timing},
     interface::KeyInput,
     interrupt::InterruptKind,
-    rom::Rom,
+    rom::{EepromSize, Rom},
     util::{pack, trait_alias},
 };
 
@@ -287,13 +287,11 @@ impl Timer {
         let mut overflow = 0;
 
         while inc > 0 {
-            let t = min(inc, 0x10000 - self.counter as u64);
-
-            let (counter, o) = self.counter.overflowing_add(t as u16);
-            self.counter = counter;
-            if o {
+            if self.counter as u64 + inc >= 0x10000 {
                 overflow += 1;
+                inc -= 0x10000 - self.counter as u64;
                 self.counter = self.reload;
+
                 if self.irq_enable {
                     let kind = match ch {
                         0 => InterruptKind::Timer0,
@@ -306,9 +304,10 @@ impl Timer {
 
                     // TODO: FIFO request for ch0, 1
                 }
+            } else {
+                self.counter += inc as u16;
+                break;
             }
-
-            inc -= t;
         }
 
         overflow
@@ -360,19 +359,6 @@ struct Serial {
 
     data: [u16; 4],
     data8: u8,
-}
-
-enum Key {
-    A = 0,
-    B = 1,
-    Select = 2,
-    Start = 3,
-    Right = 4,
-    Left = 5,
-    Up = 6,
-    Down = 7,
-    R = 8,
-    L = 9,
 }
 
 impl Bus {
@@ -522,6 +508,21 @@ impl Bus {
 
         let word_len = if self.dma[ch].transfer_type { 4 } else { 2 };
 
+        if ch == 3
+            && self.is_valid_eeprom_addr(self.dma[ch].dest_addr_internal)
+            && word_len == 2
+            && matches!(self.rom.eeprom_size(), Some(None))
+        {
+            match self.dma[ch].word_count {
+                9 => self.rom.set_eeprom_size(EepromSize::Size512),
+                17 => self.rom.set_eeprom_size(EepromSize::Size8K),
+                _ => warn!(
+                    "Write EEPROM to unknown size with DMA: {}",
+                    self.dma[ch].word_count
+                ),
+            }
+        }
+
         let src_inc = match self.dma[ch].src_addr_ctrl {
             // increment
             0 => word_len,
@@ -542,7 +543,7 @@ impl Bus {
             // fixed
             2 => 0,
             // increment / reload
-            3 => 4,
+            3 => 1,
             _ => unreachable!(),
         };
 
@@ -705,8 +706,10 @@ impl Bus {
                 let ofs = (addr & 0x01FFFFFF) as usize;
                 if ofs < self.rom.data.len() {
                     read16(&self.rom.data, ofs)
+                } else if self.is_valid_eeprom_addr(addr) {
+                    self.rom.read_eeprom() as u16
                 } else {
-                    warn!("Read from invalid Game Pak ROM address: {addr:08X}");
+                    warn!("Write to invalid Game Pak ROM address: {addr:08X}");
                     0
                 }
             }
@@ -875,7 +878,20 @@ impl Bus {
                 write16(&mut ctx.lcd_mut().oam, (addr & 0x3FF) as usize, data);
             }
 
-            0x8..=0xD => warn!("Write 16bit data to ROM"),
+            0x8..=0xD => {
+                let ix = (addr >> 25) as usize - 4;
+                ctx.elapse(if first {
+                    self.wait_cycles.gamepak_rom_1st_16[ix]
+                } else {
+                    self.wait_cycles.gamepak_rom_2nd_16[ix]
+                });
+
+                if self.is_valid_eeprom_addr(addr) {
+                    self.rom.write_eeprom(data & 1 != 0);
+                } else {
+                    warn!("Write to invalid Game Pak ROM address: {addr:08X}");
+                }
+            }
 
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_16);
@@ -976,12 +992,16 @@ impl Bus {
             0x000..=0x05E => ctx.lcd_read16(addr),
             0x060..=0x0AE => ctx.sound_read16(addr),
 
+            // DMAxSAD
+            0x0B0 | 0x0BC | 0x0C8 | 0x0D4 => 0,
+            0x0B2 | 0x0BE | 0x0CA | 0x0D6 => 0,
+
+            // DMAxDAD
+            0x0B4 | 0x0C0 | 0x0CC | 0x0D8 => 0,
+            0x0B6 | 0x0C2 | 0x0CE | 0x0DA => 0,
+
             // DMAxCNT
-            0x0B8 | 0x0C4 | 0x0D0 | 0x0DC => {
-                let i = ((addr - 0x0B0) / 0xC) as usize;
-                let mask = if i != 3 { 0x3FFF } else { 0xFFFF };
-                (self.dma[i].word_count & mask) as u16
-            }
+            0x0B8 | 0x0C4 | 0x0D0 | 0x0DC => 0,
             0x0BA | 0x0C6 | 0x0D2 | 0x0DE => {
                 let i = ((addr - 0x0B0) / 0xC) as usize;
                 let dma = &mut self.dma[i];
@@ -996,6 +1016,8 @@ impl Bus {
                     15      => dma.dma_enable,
                 }
             }
+
+            0x0E0..=0x0FE => 0,
 
             // TMxCNT_L
             0x100 | 0x104 | 0x108 | 0x10C => {
@@ -1012,6 +1034,13 @@ impl Bus {
                     6 => timer.irq_enable,
                     7 => timer.enable,
                 }
+            }
+
+            // SIOCNT
+            0x128 => {
+                // TODO
+                warn!("Read SIOCNT");
+                0
             }
 
             // KEYCNT
@@ -1047,6 +1076,8 @@ impl Bus {
                 lo as u16 | ((hi as u16) << 8)
             }
 
+            0x100C => 0,
+
             0xF600..=0xFFFE => 0,
 
             _ => todo!(
@@ -1064,6 +1095,22 @@ impl Bus {
                 );
             }
             0x060..=0x0AF => ctx.sound_write8(addr, data),
+
+            // SIODATA
+            0x120..=0x127 => {
+                let i = (addr - 0x120) as usize;
+                warn!("SIODATA[{i}] = 0x{data:02X}");
+            }
+
+            // SIOCNT
+            0x128 | 0x129 => {
+                let i = (addr - 0x128) as usize;
+                warn!("SIOCNT[{i}] = 0x{data:02X}");
+            }
+
+            // SIODATA8
+            0x12A => self.sio.data8 = data as u8,
+            0x12B..=0x12F => {}
 
             // JOYCNT
             0x140 => {
@@ -1197,26 +1244,6 @@ impl Bus {
 
             0x110..=0x11E => {}
 
-            // SIODATA
-            0x120 | 0x122 | 0x124 | 0x126 => self.sio.data[((addr - 0x120) / 2) as usize] = data,
-
-            // SIOCNT
-            0x128 => {
-                let data = data.view_bits::<Lsb0>();
-
-                match data[12..13].load::<u8>() {
-                    _ => {
-                        // TODO
-                        info!("SIOCNT = 0x{:05X}", data.load::<u16>());
-                    }
-                }
-            }
-
-            // SIODATA8
-            0x12A => self.sio.data8 = data as u8,
-
-            0x12C | 0x12E => {}
-
             // KEYINPUT
             0x130 => {} // ???
             // KEYCNT
@@ -1275,13 +1302,22 @@ impl Bus {
                     WaitCycles::new(&self.game_pak_wait_ctrl, self.game_pak_ram_wait_ctrl);
             }
 
-            0x206 | 0x20A | 0x20C..=0x21E => {}
+            0x206 | 0x20A | 0x20C..=0x21E | 0x100C => {}
 
             _ => {
                 self.io_write8(ctx, addr, data as u8);
                 self.io_write8(ctx, addr + 1, (data >> 8) as u8);
             }
         }
+    }
+
+    fn is_valid_eeprom_addr(&self, addr: u32) -> bool {
+        if addr & 0x08000000 == 0 {
+            return false;
+        }
+        let ofs = addr & 0x01FFFFFF;
+        let large_rom = self.rom.data.len() >= 0x01000000;
+        (!large_rom && ofs & 0x01000000 != 0) || (large_rom && ofs & 0x01FFFF00 == 0x01FFFF00)
     }
 }
 

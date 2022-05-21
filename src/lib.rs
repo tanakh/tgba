@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Result};
 use compress_tools::{list_archive_files, uncompress_archive_file};
 use log::info;
 use sdl2::{
+    controller::{Button, GameController},
     event::Event,
     keyboard::{Keycode, Scancode},
     pixels::Color,
@@ -47,11 +48,6 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
 
     let mut canvas = window.into_canvas().present_vsync().build().unwrap();
 
-    // sdl_context
-    //     .event()
-    //     .unwrap()
-    //     .flush_event(sdl2::event::EventType::KeyDown);
-
     canvas.set_draw_color(Color::RGB(0, 0, 0));
     let mut event_pump = sdl_context.event_pump().unwrap();
 
@@ -63,13 +59,24 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
     )
     .unwrap();
 
-    let mut prev_time = std::time::Instant::now();
+    let game_controller_subsystem = sdl_context.game_controller().unwrap();
+
+    let game_controller = game_controller_subsystem.open(0).ok();
 
     while process_events(&mut event_pump) {
-        let key_input = get_key_input(&event_pump);
+        let start_time = std::time::Instant::now();
+
+        let key_input = get_key_input(&event_pump, &game_controller);
         eprintln!("Key input: {key_input:?}");
+
+        // if event_pump
+        //     .keyboard_state()
+        //     .is_scancode_pressed(Scancode::Space)
+        // {
         agb.set_key_input(&key_input);
         agb.run_frame();
+        // }
+
         let frame_buf = agb.frame_buf();
 
         surface.with_lock_mut(|buf| {
@@ -89,9 +96,7 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
 
         canvas.present();
 
-        let now = std::time::Instant::now();
-
-        let elapsed = now - prev_time;
+        let elapsed = std::time::Instant::now() - start_time;
         let wait = std::time::Duration::from_nanos(1_000_000_000u64 / 60);
         if wait > elapsed {
             std::thread::sleep(wait - elapsed);
@@ -115,25 +120,39 @@ fn process_events(event_pump: &mut EventPump) -> bool {
     true
 }
 
-fn get_key_input(e: &EventPump) -> KeyInput {
+fn get_key_input(e: &EventPump, game_controller: &Option<GameController>) -> KeyInput {
     let ks = e.keyboard_state();
 
     for k in ks.pressed_scancodes() {
         eprintln!("* {k:?}");
     }
 
-    KeyInput {
-        a: ks.is_scancode_pressed(Scancode::X),
-        b: ks.is_scancode_pressed(Scancode::Z),
-        select: ks.is_scancode_pressed(Scancode::RShift),
-        start: ks.is_scancode_pressed(Scancode::Return),
-        right: ks.is_scancode_pressed(Scancode::Right),
-        left: ks.is_scancode_pressed(Scancode::Left),
-        up: ks.is_scancode_pressed(Scancode::Up),
-        down: ks.is_scancode_pressed(Scancode::Down),
-        r: ks.is_scancode_pressed(Scancode::S),
-        l: ks.is_scancode_pressed(Scancode::A),
+    let mut ret = KeyInput::default();
+    ret.a = ks.is_scancode_pressed(Scancode::X);
+    ret.b = ks.is_scancode_pressed(Scancode::Z);
+    ret.select = ks.is_scancode_pressed(Scancode::RShift);
+    ret.start = ks.is_scancode_pressed(Scancode::Return);
+    ret.right = ks.is_scancode_pressed(Scancode::Right);
+    ret.left = ks.is_scancode_pressed(Scancode::Left);
+    ret.up = ks.is_scancode_pressed(Scancode::Up);
+    ret.down = ks.is_scancode_pressed(Scancode::Down);
+    ret.r = ks.is_scancode_pressed(Scancode::S);
+    ret.l = ks.is_scancode_pressed(Scancode::A);
+
+    if let Some(game_controller) = game_controller {
+        ret.a = game_controller.button(Button::B);
+        ret.b = game_controller.button(Button::A);
+        ret.select = game_controller.button(Button::Back);
+        ret.start = game_controller.button(Button::Start);
+        ret.right = game_controller.button(Button::DPadRight);
+        ret.left = game_controller.button(Button::DPadLeft);
+        ret.up = game_controller.button(Button::DPadUp);
+        ret.down = game_controller.button(Button::DPadDown);
+        ret.r = game_controller.button(Button::RightShoulder);
+        ret.l = game_controller.button(Button::LeftShoulder);
     }
+
+    ret
 }
 
 fn load_rom(file: &Path) -> Result<Rom> {
@@ -176,7 +195,8 @@ fn dump_rom_info(rom: &Rom) {
         ["Maker Code", String::from_utf8_lossy(&rom.maker_code)],
         ["Main Unit Code", rom.main_unit_code],
         ["Device Type", rom.device_type],
-        ["ROM Version", rom.rom_version]
+        ["ROM Version", rom.rom_version],
+        ["Backup Type", rom.backup_type()]
     };
     table.set_format(*prettytable::format::consts::FORMAT_NO_LINESEP_WITH_TITLE);
     table.printstd();
