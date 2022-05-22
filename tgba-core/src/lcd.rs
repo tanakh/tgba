@@ -88,7 +88,7 @@ struct Bg {
     mosaic: bool,
     color_mode: bool, // 0: 16 colors x 16 palettes, 1: 256 colors x 1 palette
     screen_base_block: u8,
-    area_overflow_processing: bool, // 0: transparent, 1: wraparound
+    area_overflow: bool, // 0: transparent, 1: wraparound
     screen_size: u8,
 
     hofs: u16,
@@ -292,7 +292,7 @@ impl Lcd {
                     6       => bg_ctrl.mosaic,
                     7       => bg_ctrl.color_mode,
                     8..=12  => bg_ctrl.screen_base_block,
-                    13      => bg_ctrl.area_overflow_processing,
+                    13      => bg_ctrl.area_overflow,
                     14..=15 => bg_ctrl.screen_size,
                 }
             }
@@ -413,7 +413,7 @@ impl Lcd {
                 bg_ctrl.color_mode = v[7];
                 bg_ctrl.screen_base_block = v[8..=12].load();
                 if i == 2 || i == 3 {
-                    bg_ctrl.area_overflow_processing = v[13];
+                    bg_ctrl.area_overflow = v[13];
                 }
                 bg_ctrl.screen_size = v[14..=15].load();
             }
@@ -458,7 +458,7 @@ impl Lcd {
             }
             0x02A | 0x03A => {
                 let i = (2 + (addr - 0x028) / 0x10) as usize;
-                self.bg[i].x.view_bits_mut::<Lsb0>()[16..=28].store(data);
+                self.bg[i].x.view_bits_mut::<Lsb0>()[16..=27].store(data);
             }
             // BGxY
             0x02C | 0x03C => {
@@ -467,7 +467,7 @@ impl Lcd {
             }
             0x02E | 0x03E => {
                 let i = (2 + (addr - 0x028) / 0x10) as usize;
-                self.bg[i].y.view_bits_mut::<Lsb0>()[16..=28].store(data);
+                self.bg[i].y.view_bits_mut::<Lsb0>()[16..=27].store(data);
             }
 
             // WINxH
@@ -701,17 +701,17 @@ impl Lcd {
         const BG_SIZE_TBL: &[u32] = &[128, 256, 512, 1024];
 
         let size = BG_SIZE_TBL[self.bg[i].screen_size as usize];
+        let bw = size as usize / 8;
 
         let screen_base_addr = self.bg[i].screen_base_block as usize * 0x800;
         let char_base_addr = self.bg[i].char_base_block as usize * 0x4000;
 
         // TODO: mosaic
-        // TODO: overflow / wrapping
 
-        let dx = sign_extend(self.bg[i].dx as u32, 15);
-        let dmx = sign_extend(self.bg[i].dmx as u32, 15);
-        let dy = sign_extend(self.bg[i].dy as u32, 15);
-        let dmy = sign_extend(self.bg[i].dmy as u32, 15);
+        let dx = self.bg[i].dx as i16 as i32;
+        let dmx = self.bg[i].dmx as i16 as i32;
+        let dy = self.bg[i].dy as i16 as i32;
+        let dmy = self.bg[i].dmy as i16 as i32;
 
         // eprintln!(
         //     "BG{i}: size: {size}x{size}, refx: {refx}, refy: {refy}, dx = {dx}, dmx = {dmx}, dy = {dy}, dmy = {dmy}",
@@ -723,31 +723,38 @@ impl Lcd {
         //     dmy = dmy as f64 / 256.0,
         // );
 
-        let mut cx = sign_extend(self.bg[i].x, 27) + self.y as i32 * dmx;
-        let mut cy = sign_extend(self.bg[i].y, 27) + self.y as i32 * dmy;
+        let cx = sign_extend(self.bg[i].x, 27);
+        let cy = sign_extend(self.bg[i].y, 27);
 
         for x in 0..SCREEN_WIDTH {
-            let x2 = (cx >> 8) as u32 & (size - 1);
-            let y2 = (cy >> 8) as u32 & (size - 1);
+            let rx = (cx + dx * x as i32) >> 8;
+            let ry = (cy + dy * x as i32) >> 8;
 
-            let bx = (x2 / 8) as usize;
-            let by = (y2 / 8) as usize;
+            if !self.bg[i].area_overflow
+                && !(rx >= 0 && rx < size as i32 && ry >= 0 && ry < size as i32)
+            {
+                continue;
+            }
 
-            let ox = (x2 % 8) as usize;
-            let oy = (y2 % 8) as usize;
+            let rx = rx as u32 & (size - 1);
+            let ry = ry as u32 & (size - 1);
 
-            let char = self.vram[screen_base_addr + by * size as usize / 8 + bx];
-            let col_num = self.vram[char_base_addr + char as usize * 64 + oy * 8 + ox];
+            let bx = (rx / 8) as usize;
+            let by = (ry / 8) as usize;
 
-            // eprintln!("x: {x:3}, x2: {x2:3}, y2: {y2:3}, col: {col_num:03X}");
+            let ox = (rx % 8) as usize;
+            let oy = (ry % 8) as usize;
+
+            let char = self.vram[screen_base_addr + by * bw + bx] as usize;
+            let col_num = self.vram[char_base_addr + char * 64 + oy * 8 + ox];
 
             if col_num != 0 {
                 self.line_buf.bg[i][x as usize] = self.bg_palette256(col_num as _);
             }
-
-            cx += dx;
-            cy += dy;
         }
+
+        self.bg[i].x = (cx + dmx) as u32 & 0x0FFFFFFF;
+        self.bg[i].y = (cy + dmy) as u32 & 0x0FFFFFFF;
     }
 
     fn render_mode3_bg(&mut self) {
@@ -772,6 +779,8 @@ impl Lcd {
         } else {
             0xA000
         } + self.y * 0xF0;
+
+        // TODO: Rotate
 
         for x in 0..SCREEN_WIDTH {
             let col_num = self.vram[base_addr as usize + x as usize];
@@ -1308,5 +1317,5 @@ fn num_of_render_cycle(width: u32, rot: bool) -> u32 {
 
 fn sign_extend(x: u32, sign: u32) -> i32 {
     let shift = 31 - sign;
-    (x as i32) << shift >> shift
+    (x << shift) as i32 >> shift
 }

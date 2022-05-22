@@ -228,7 +228,7 @@ impl Dma {
                 0 => "inc",
                 1 => "dec",
                 2 => "fixed",
-                3 => "inc/reload",
+                3 => "prohibited",
                 _ => unreachable!(),
             }
         );
@@ -239,7 +239,7 @@ impl Dma {
                 0 => "inc",
                 1 => "dec",
                 2 => "fixed",
-                3 => "prohibited",
+                3 => "inc/reload",
                 _ => unreachable!(),
             }
         );
@@ -562,7 +562,7 @@ impl Bus {
                 // fixed
                 2 => 0,
                 // increment / reload
-                3 => 1,
+                3 => word_len,
                 _ => unreachable!(),
             }
         };
