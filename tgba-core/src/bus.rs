@@ -573,11 +573,37 @@ impl Bus {
 
         for i in 0..word_count {
             if word_len == 4 {
-                let data = self.read32(ctx, self.dma[ch].src_addr_internal, i == 0);
-                self.write32(ctx, self.dma[ch].dest_addr_internal, data, i == 0);
+                if self.dma[ch].src_addr_internal % 4 != 0 {
+                    warn!(
+                        "DMA src addr misaligned: {}",
+                        self.dma[ch].src_addr_internal
+                    );
+                }
+                if self.dma[ch].dest_addr_internal % 4 != 0 {
+                    warn!(
+                        "DMA dest addr misaligned: {}",
+                        self.dma[ch].dest_addr_internal
+                    );
+                }
+
+                let data = self.read32(ctx, self.dma[ch].src_addr_internal & !3, i == 0);
+                self.write32(ctx, self.dma[ch].dest_addr_internal & !3, data, i == 0);
             } else {
-                let data = self.read16(ctx, self.dma[ch].src_addr_internal, i == 0);
-                self.write16(ctx, self.dma[ch].dest_addr_internal, data, i == 0);
+                if self.dma[ch].src_addr_internal % 2 != 0 {
+                    warn!(
+                        "DMA src addr misaligned: {}",
+                        self.dma[ch].src_addr_internal
+                    );
+                }
+                if self.dma[ch].dest_addr_internal % 2 != 0 {
+                    warn!(
+                        "DMA dest addr misaligned: {}",
+                        self.dma[ch].dest_addr_internal
+                    );
+                }
+
+                let data = self.read16(ctx, self.dma[ch].src_addr_internal & !1, i == 0);
+                self.write16(ctx, self.dma[ch].dest_addr_internal & !1, data, i == 0);
             }
 
             self.dma[ch].src_addr_internal = self.dma[ch].src_addr_internal.wrapping_add(src_inc);
@@ -668,7 +694,8 @@ impl Bus {
                 ctx.elapse(self.wait_cycles.gamepak_ram_8);
                 self.gamepak_ram[(addr & 0xFFFF) as usize]
             }
-            _ => panic!(),
+
+            _ => panic!("Invalid Read8: 0x{addr:08X}"),
         }
     }
 
@@ -738,7 +765,8 @@ impl Bus {
                 ctx.elapse(self.wait_cycles.gamepak_ram_16);
                 read16(&self.gamepak_ram, (addr & 0xFFFF) as usize)
             }
-            _ => panic!(),
+
+            _ => panic!("Invalid Read16: 0x{addr:08X}"),
         }
     }
 
@@ -809,7 +837,7 @@ impl Bus {
                 ctx.elapse(self.wait_cycles.gamepak_ram_32);
                 read32(&self.gamepak_ram, (addr & 0xFFFF) as usize)
             }
-            _ => panic!("Read: 0x{addr:08X}"),
+            _ => panic!("Invalid Read32: 0x{addr:08X}"),
         }
     }
 

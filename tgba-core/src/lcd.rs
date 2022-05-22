@@ -536,7 +536,7 @@ impl Lcd {
 
             0x056..=0x05E => {}
 
-            _ => unreachable!(),
+            _ => unreachable!("Invalid read from {addr:03X}"),
         }
     }
 }
@@ -863,27 +863,29 @@ impl Lcd {
 
             let priority = (oam[5] >> 2) & 3;
 
-            let y_range = if y + h > 256 {
-                (0, (y + h) % 256)
-            } else {
-                (y, y + h)
-            };
+            // let y_range = if y + h > 256 {
+            //     (y as i32 - 256, y + h - 256)
+            // } else {
+            //     (y, y + h)
+            // };
 
-            if !(y_range.0 <= self.y && self.y < y_range.1) {
-                continue;
-            }
-
-            // if (x, y, w, h) != (0, 0, 8, 8) {
-            //     eprintln!(
-            //         "OBJ[{i:03}]: x: {x:3}, y: {y:3}, w: {w:3}, h: {h:3}, col: {col:3}, dim: {dim}, chr: 0x{char_name:03X}, type: {ty:4}, double: {dbl}",
-            //         ty = if !rot { "norm" } else { "rot" },
-            //         col = if color_256 {256} else {16},
-            //         dim = if self.obj_format {1} else {2},
-            //         dbl = if double {"y"} else {"n"},
-            //     );
+            // if !(y_range.0 <= self.y && self.y < y_range.1) {
+            //     continue;
             // }
 
-            let rely = self.y - y_range.0;
+            // let rely = self.y - y_range.0;
+
+            let rely = if y + h > 256 {
+                if !(self.y < y + h - 256) {
+                    continue;
+                }
+                256 + self.y - y
+            } else {
+                if !(y <= self.y && self.y < y + h) {
+                    continue;
+                }
+                self.y - y
+            };
 
             if !rot {
                 // Normal OBj
@@ -942,13 +944,13 @@ impl Lcd {
                         let tx = (char_name % 32) & !1;
                         let ty = char_name / 32;
 
-                        for dx in 0..w {
-                            let cx = ((x + dx) % 512) as usize;
+                        for relx in 0..w {
+                            let cx = ((x + relx) % 512) as usize;
                             if cx >= 240 {
                                 continue;
                             }
 
-                            let dx = if !hflip { dx } else { w - 1 - dx };
+                            let dx = if !hflip { relx } else { w - 1 - relx };
                             let tile_num = (ty + dy / 8) * 32 + tx + dx / 8 * 2;
                             let addr = tile_num * 32 + (dy % 8) * 8 + dx % 8;
                             let col_num = self.vram[(obj_base_addr + addr) as usize];
@@ -956,8 +958,18 @@ impl Lcd {
                         }
                     } else {
                         // 1-dim
+                        for relx in 0..w {
+                            let cx = ((x + relx) % 512) as usize;
+                            if cx >= 240 {
+                                continue;
+                            }
 
-                        todo!("Obj: Normal 256 color 1-dim");
+                            let dx = if !hflip { relx } else { w - 1 - relx };
+                            let tile_num = char_name + (dy / 8) * (w / 8) * 2 + dx / 8 * 2;
+                            let addr = tile_num * 32 + (dy % 8) * 8 + dx % 8;
+                            let col_num = self.vram[(obj_base_addr + addr) as usize];
+                            self.put_obj_pixel256(cx, col_num, mode, priority);
+                        }
                     }
                 }
             } else {
@@ -1014,12 +1026,43 @@ impl Lcd {
                     } else {
                         // 1-dim
 
-                        todo!("Obj: Normal 16 color 1-dim");
+                        let mut rx = (ow as i32 / 2) << 8;
+                        let mut ry = (oh as i32 / 2) << 8;
+
+                        let rdx = -(w as i32 / 2);
+                        rx += dx * rdx;
+                        ry += dy * rdx;
+
+                        let rdy = rely as i32 - (h as i32 / 2);
+                        rx += dmx * rdy;
+                        ry += dmy * rdy;
+
+                        for i in 0..w {
+                            let sx = ((x + i) % 512) as usize;
+                            if sx >= 240 {
+                                continue;
+                            }
+
+                            let rx2 = (rx + dx * i as i32) >> 8;
+                            let ry2 = (ry + dy * i as i32) >> 8;
+
+                            if !(rx2 >= 0 && rx2 < ow as i32 && ry2 >= 0 && ry2 < oh as i32) {
+                                continue;
+                            }
+
+                            let rx2 = rx2 as u32;
+                            let ry2 = ry2 as u32;
+
+                            let tile_num = char_name + (ry2 / 8) * (ow / 8) + rx2 / 8;
+                            let addr = tile_num * 32 + (ry2 % 8) * 4 + rx2 % 8 / 2;
+                            let col_num =
+                                (self.vram[(obj_base_addr + addr) as usize] >> (rx2 % 2 * 4)) & 0xf;
+                            self.put_obj_pixel16(sx, palette_num, col_num, mode, priority);
+                        }
                     }
                 } else {
                     if !self.obj_format {
                         // 2-dim
-
                         let tx = (char_name % 32) & !1;
                         let ty = char_name / 32;
 
@@ -1057,8 +1100,38 @@ impl Lcd {
                         }
                     } else {
                         // 1-dim
+                        let mut rx = (ow as i32 / 2) << 8;
+                        let mut ry = (oh as i32 / 2) << 8;
 
-                        todo!("Obj: Normal 256 color 1-dim");
+                        let rdx = -(w as i32 / 2);
+                        rx += dx * rdx;
+                        ry += dy * rdx;
+
+                        let rdy = rely as i32 - (h as i32 / 2);
+                        rx += dmx * rdy;
+                        ry += dmy * rdy;
+
+                        for i in 0..w {
+                            let sx = ((x + i) % 512) as usize;
+                            if sx >= 240 {
+                                continue;
+                            }
+
+                            let rx2 = (rx + dx * i as i32) >> 8;
+                            let ry2 = (ry + dy * i as i32) >> 8;
+
+                            if !(rx2 >= 0 && rx2 < ow as i32 && ry2 >= 0 && ry2 < oh as i32) {
+                                continue;
+                            }
+
+                            let rx2 = rx2 as u32;
+                            let ry2 = ry2 as u32;
+
+                            let tile_num = char_name + (ry2 / 8) * (ow / 8) * 2 + rx2 / 8 * 2;
+                            let addr = tile_num * 32 + (ry2 % 8) * 8 + rx2 % 8;
+                            let col_num = self.vram[(obj_base_addr + addr) as usize];
+                            self.put_obj_pixel256(sx, col_num, mode, priority);
+                        }
                     }
                 }
             }

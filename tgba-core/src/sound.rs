@@ -926,12 +926,35 @@ impl DirectSound {
 impl Sound {
     pub fn read8(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
         let data = match addr {
-            // 0xFF10..=0xFF14 => self.pulse[0].read((addr - 0xFF10) as usize),
-            // 0xFF15 => !0,
-            // 0xFF16..=0xFF19 => self.pulse[1].read((addr - 0xFF15) as usize),
-            // 0xFF1A..=0xFF1E => self.wave.read((addr - 0xFF1A) as usize),
-            // 0xFF1F => !0,
-            // 0xFF20..=0xFF23 => self.noise.read((addr - 0xFF20) as usize),
+            0x060 => self.pulse[0].read(0),
+            0x061 => 0,
+            0x062 => self.pulse[0].read(1),
+            0x063 => self.pulse[0].read(2),
+            0x064 => self.pulse[0].read(3),
+            0x065 => self.pulse[0].read(4),
+            0x066..=0x067 => 0,
+
+            0x068 => self.pulse[1].read(1),
+            0x069 => self.pulse[1].read(2),
+            0x06A..=0x06B => 0,
+            0x06C => self.pulse[1].read(3),
+            0x06D => self.pulse[1].read(4),
+            0x06E..=0x06F => 0,
+
+            0x070 => self.wave.read(0),
+            0x071 => 0,
+            0x072 => self.wave.read(1),
+            0x073 => self.wave.read(2),
+            0x074 => self.wave.read(3),
+            0x075 => self.wave.read(4),
+            0x076..=0x077 => 0,
+
+            0x078 => self.noise.read(1),
+            0x079 => self.noise.read(2),
+            0x07A..=0x07B => 0,
+            0x07C => self.noise.read(3),
+            0x07D => self.noise.read(4),
+            0x07E..=0x07F => 0,
 
             // // NR50: Channel control / ON-OFF / Volume (R/W)
             // 0xFF24 => pack! {
@@ -976,6 +999,18 @@ impl Sound {
             //     4..=7 => self.noise.output().unwrap_or(0),
             //     0..=3 => self.wave.output().unwrap_or(0),
             // },
+
+            // NR51: Selection of Sound output terminal (R/W)
+            0x081 => pack! {
+                7 => self.channel_ctrl[1].output_ch[3],
+                6 => self.channel_ctrl[1].output_ch[2],
+                5 => self.channel_ctrl[1].output_ch[1],
+                4 => self.channel_ctrl[1].output_ch[0],
+                3 => self.channel_ctrl[0].output_ch[3],
+                2 => self.channel_ctrl[0].output_ch[2],
+                1 => self.channel_ctrl[0].output_ch[1],
+                0 => self.channel_ctrl[0].output_ch[0],
+            },
 
             // SOUNDBIAS
             0x088 => 0x00,
