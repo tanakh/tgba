@@ -64,6 +64,32 @@ fn extend_color(col5: u16) -> u8 {
     ((col5 << 3) | (col5 >> 2)) as u8
 }
 
+#[derive(Default)]
+pub struct AudioBuf {
+    pub buf: Vec<AudioSample>,
+}
+
+impl AudioBuf {
+    pub fn new() -> Self {
+        Self { buf: vec![] }
+    }
+
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+}
+
+pub struct AudioSample {
+    pub right: i16,
+    pub left: i16,
+}
+
+impl AudioSample {
+    pub fn new(right: i16, left: i16) -> Self {
+        Self { right, left }
+    }
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct KeyInput {
     pub a: bool,

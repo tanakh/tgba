@@ -45,7 +45,7 @@ pub enum EepromState {
 impl Default for Eeprom {
     fn default() -> Self {
         Self {
-            data: vec![0; 512],
+            data: vec![],
             state: EepromState::WaitForCommand { step: 0 },
         }
     }
@@ -86,8 +86,6 @@ impl Eeprom {
     }
 
     fn read(&mut self) -> bool {
-        assert!(!self.data.is_empty());
-
         let data = match &mut self.state {
             EepromState::WaitForCommand { .. } => true,
             EepromState::WaitForAddr { .. } => false,
@@ -116,8 +114,6 @@ impl Eeprom {
     }
 
     fn write(&mut self, data: bool) {
-        assert!(!self.data.is_empty());
-
         log::trace!("EEPROM: write {data:?}");
 
         let addr_len = self.addr_len();

@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Result};
 use compress_tools::{list_archive_files, uncompress_archive_file};
 use log::info;
 use sdl2::{
+    audio::{AudioQueue, AudioSpecDesired},
     controller::{Button, GameController},
     event::Event,
     keyboard::{Keycode, Scancode},
@@ -18,6 +19,7 @@ use std::{
     fs::{read, File},
     io::Read,
     path::Path,
+    time::Duration,
 };
 use tempfile::NamedTempFile;
 
@@ -59,6 +61,20 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
     )
     .unwrap();
 
+    const SOUND_BUF_LEN: u16 = 2048;
+
+    let audio_subsystem = sdl_context.audio().map_err(|e| anyhow!("{e}"))?;
+    let desired_spec = AudioSpecDesired {
+        freq: Some(48000),
+        channels: Some(2),
+        samples: Some(SOUND_BUF_LEN),
+    };
+    let audio_queue: AudioQueue<i16> = audio_subsystem
+        .open_queue(None, &desired_spec)
+        .map_err(|e| anyhow!("{e}"))?;
+    audio_queue.queue_audio(&vec![0; 2048]).unwrap();
+    audio_queue.resume();
+
     let game_controller_subsystem = sdl_context.game_controller().unwrap();
 
     let game_controller = game_controller_subsystem.open(0).ok();
@@ -67,7 +83,7 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
         let start_time = std::time::Instant::now();
 
         let key_input = get_key_input(&event_pump, &game_controller);
-        eprintln!("Key input: {key_input:?}");
+        // eprintln!("Key input: {key_input:?}");
 
         // if event_pump
         //     .keyboard_state()
@@ -96,11 +112,32 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
 
         canvas.present();
 
-        let elapsed = std::time::Instant::now() - start_time;
-        let wait = std::time::Duration::from_nanos(1_000_000_000u64 / 60);
-        if wait > elapsed {
-            std::thread::sleep(wait - elapsed);
+        let audio_buf = agb.audio_buf();
+        // assert!(
+        //     (799..=801).contains(&audio_buf.len()),
+        //     "invalid generated audio length: {}",
+        //     audio_buf.len()
+        // );
+
+        while audio_queue.size() > SOUND_BUF_LEN as u32 * 4 {
+            std::thread::sleep(Duration::from_millis(1));
         }
+
+        audio_queue
+            .queue_audio(
+                &audio_buf
+                    .buf
+                    .iter()
+                    .flat_map(|s| [s.left, s.right])
+                    .collect::<Vec<i16>>(),
+            )
+            .unwrap();
+
+        // let elapsed = std::time::Instant::now() - start_time;
+        // let wait = std::time::Duration::from_nanos(1_000_000_000u64 / 60);
+        // if wait > elapsed {
+        //     std::thread::sleep(wait - elapsed);
+        // }
     }
 
     Ok(())
@@ -122,10 +159,6 @@ fn process_events(event_pump: &mut EventPump) -> bool {
 
 fn get_key_input(e: &EventPump, game_controller: &Option<GameController>) -> KeyInput {
     let ks = e.keyboard_state();
-
-    for k in ks.pressed_scancodes() {
-        eprintln!("* {k:?}");
-    }
 
     let mut ret = KeyInput::default();
     ret.a = ks.is_scancode_pressed(Scancode::X);

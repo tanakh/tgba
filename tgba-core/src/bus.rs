@@ -1,17 +1,17 @@
-use std::{cmp::min, fmt::UpperHex, mem::size_of};
+use std::{fmt::UpperHex, mem::size_of};
 
 use bitvec::prelude::*;
 use log::{info, log_enabled, trace, warn};
 
 use crate::{
-    context::{Interrupt, Lcd, Sound, Timing},
+    context::{Interrupt, Lcd, Sound, SoundDma, Timing},
     interface::KeyInput,
     interrupt::InterruptKind,
     rom::{EepromSize, Rom},
     util::{pack, trait_alias},
 };
 
-trait_alias!(pub trait Context = Lcd + Sound + Timing + Interrupt);
+trait_alias!(pub trait Context = Lcd + Sound + Timing + SoundDma + Interrupt);
 
 pub struct Bus {
     bios: Vec<u8>,
@@ -183,7 +183,39 @@ impl Dma {
     fn repeat(&self) -> bool {
         self.repeat
             && (self.start_timing == StartTiming::VBlank as u8
-                || self.start_timing == StartTiming::HBlank as u8)
+                || self.start_timing == StartTiming::HBlank as u8
+                || self.start_timing == StartTiming::Special as u8)
+    }
+
+    fn check_dma_start(&self, ctx: &mut impl Context) -> bool {
+        match self.start_timing {
+            // Start immetiately
+            0 => true,
+            // Start in a V-blank interval
+            1 => self.prev_dma_frame != ctx.lcd().frame() && ctx.lcd().vblank(),
+            // Start in an H-blank interval
+            2 => {
+                let lcd = ctx.lcd();
+                lcd.hblank()
+                    && (self.prev_dma_frame, self.prev_dma_line) != (lcd.frame(), lcd.line())
+            }
+            3 => match self.ch {
+                // Prohibited
+                0 => false,
+                1 => ctx.sound_dma_request(0),
+                2 => ctx.sound_dma_request(1),
+                3 => {
+                    // TODO: Video capture
+                    false
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn is_sound_dma(&self) -> bool {
+        (self.ch == 1 || self.ch == 2) && self.start_timing == StartTiming::Special as u8
     }
 
     fn trace(&self) {
@@ -301,8 +333,10 @@ impl Timer {
                         _ => unreachable!(),
                     };
                     ctx.interrupt_mut().set_interrupt(kind);
+                }
 
-                    // TODO: FIFO request for ch0, 1
+                if ch == 0 || ch == 1 {
+                    ctx.sound_timer_overflow(ch as _);
                 }
             } else {
                 self.counter += inc as u16;
@@ -444,6 +478,9 @@ impl Bus {
         for ch in 0..4 {
             self.process_dma(ctx, ch);
         }
+        for ch in 0..2 {
+            ctx.set_sound_dma_request(ch, false);
+        }
 
         let prev_cycle = self.prev_cycle;
         let cur_cycle = ctx.now();
@@ -456,42 +493,12 @@ impl Bus {
         }
     }
 
-    fn check_dma_start(&mut self, ctx: &mut impl Context, ch: usize) -> bool {
-        match self.dma[ch].start_timing {
-            // Start immetiately
-            0 => true,
-            // Start in a V-blank interval
-            1 => self.dma[ch].prev_dma_frame != ctx.lcd().frame() && ctx.lcd().vblank(),
-            // Start in an H-blank interval
-            2 => {
-                let lcd = ctx.lcd();
-                lcd.hblank()
-                    && (self.dma[ch].prev_dma_frame, self.dma[ch].prev_dma_line)
-                        != (lcd.frame(), lcd.line())
-            }
-            3 => match ch {
-                // Prohibited
-                0 => false,
-                1 | 2 => {
-                    // TODO: Sound FIFO
-                    false
-                }
-                3 => {
-                    // TODO: Video capture
-                    false
-                }
-                _ => unreachable!(),
-            },
-            _ => unreachable!(),
-        }
-    }
-
     fn process_dma(&mut self, ctx: &mut impl Context, ch: usize) {
         if !self.dma[ch].dma_enable {
             return;
         }
 
-        if !self.check_dma_start(ctx, ch) {
+        if !self.dma[ch].check_dma_start(ctx) {
             return;
         }
 
@@ -506,20 +513,29 @@ impl Bus {
         self.dma[ch].prev_dma_frame = ctx.lcd().frame();
         self.dma[ch].prev_dma_line = ctx.lcd().line();
 
-        let word_len = if self.dma[ch].transfer_type { 4 } else { 2 };
+        let is_sound_dma = self.dma[ch].is_sound_dma();
+
+        let word_len = if self.dma[ch].transfer_type || is_sound_dma {
+            4
+        } else {
+            2
+        };
+
+        let word_count = if is_sound_dma {
+            4
+        } else {
+            self.dma[ch].word_count
+        };
 
         if ch == 3
             && self.is_valid_eeprom_addr(self.dma[ch].dest_addr_internal)
             && word_len == 2
             && matches!(self.rom.eeprom_size(), Some(None))
         {
-            match self.dma[ch].word_count {
+            match word_count {
                 9 => self.rom.set_eeprom_size(EepromSize::Size512),
                 17 => self.rom.set_eeprom_size(EepromSize::Size8K),
-                _ => warn!(
-                    "Write EEPROM to unknown size with DMA: {}",
-                    self.dma[ch].word_count
-                ),
+                _ => warn!("Write EEPROM to unknown size with DMA: {}", word_count),
             }
         }
 
@@ -535,23 +551,27 @@ impl Bus {
             _ => unreachable!(),
         };
 
-        let dest_inc = match self.dma[ch].dest_addr_ctrl {
-            // increment
-            0 => word_len,
-            // decrement
-            1 => -(word_len as i32) as u32,
-            // fixed
-            2 => 0,
-            // increment / reload
-            3 => 1,
-            _ => unreachable!(),
+        let dest_inc = if is_sound_dma {
+            0
+        } else {
+            match self.dma[ch].dest_addr_ctrl {
+                // increment
+                0 => word_len,
+                // decrement
+                1 => -(word_len as i32) as u32,
+                // fixed
+                2 => 0,
+                // increment / reload
+                3 => 1,
+                _ => unreachable!(),
+            }
         };
 
         if log_enabled!(log::Level::Trace) {
             self.dma[ch].trace();
         }
 
-        for i in 0..self.dma[ch].word_count {
+        for i in 0..word_count {
             if word_len == 4 {
                 let data = self.read32(ctx, self.dma[ch].src_addr_internal, i == 0);
                 self.write32(ctx, self.dma[ch].dest_addr_internal, data, i == 0);
@@ -789,7 +809,7 @@ impl Bus {
                 ctx.elapse(self.wait_cycles.gamepak_ram_32);
                 read32(&self.gamepak_ram, (addr & 0xFFFF) as usize)
             }
-            _ => panic!(),
+            _ => panic!("Read: 0x{addr:08X}"),
         }
     }
 

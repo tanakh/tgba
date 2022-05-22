@@ -4,7 +4,7 @@ use bitvec::prelude::*;
 use log::{info, trace};
 
 use crate::{
-    consts::{CLOCK_PER_DOT, SCREEN_HEIGHT, SCREEN_WIDTH, VISIBLE_HEIGHT, VISIBLE_WIDTH},
+    consts::{CLOCK_PER_DOT, DOTS_PER_LINE, LINES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH},
     context::{Interrupt, Timing},
     interface::{FrameBuf, Pixel},
     interrupt::InterruptKind,
@@ -70,13 +70,13 @@ struct LineBuf {
 impl Default for LineBuf {
     fn default() -> Self {
         Self {
-            bg: <[Vec<u16>; 4]>::default().map(|_| vec![0x8000; VISIBLE_WIDTH as _]),
-            obj: vec![0; VISIBLE_WIDTH as _],
-            obj_attr: vec![Default::default(); VISIBLE_WIDTH as _],
-            surface: <[Vec<u16>; 2]>::default().map(|_| vec![0x8000; VISIBLE_WIDTH as _]),
-            surface_priority: <[Vec<u8>; 2]>::default().map(|_| vec![0; VISIBLE_WIDTH as _]),
-            surface_attr: <[Vec<u8>; 2]>::default().map(|_| vec![0; VISIBLE_WIDTH as _]),
-            finished: vec![0; VISIBLE_WIDTH as _],
+            bg: <[Vec<u16>; 4]>::default().map(|_| vec![0x8000; SCREEN_WIDTH as _]),
+            obj: vec![0; SCREEN_WIDTH as _],
+            obj_attr: vec![Default::default(); SCREEN_WIDTH as _],
+            surface: <[Vec<u16>; 2]>::default().map(|_| vec![0x8000; SCREEN_WIDTH as _]),
+            surface_priority: <[Vec<u8>; 2]>::default().map(|_| vec![0; SCREEN_WIDTH as _]),
+            surface_attr: <[Vec<u8>; 2]>::default().map(|_| vec![0; SCREEN_WIDTH as _]),
+            finished: vec![0; SCREEN_WIDTH as _],
         }
     }
 }
@@ -163,7 +163,7 @@ impl Lcd {
             vram: vec![0; 96 * 1024],
             oam: vec![0; 1024],
             palette: vec![0; 1024],
-            frame_buf: FrameBuf::new(VISIBLE_WIDTH, VISIBLE_HEIGHT),
+            frame_buf: FrameBuf::new(SCREEN_WIDTH, SCREEN_HEIGHT),
             ..Default::default()
         }
     }
@@ -196,7 +196,7 @@ impl Lcd {
     fn tick_dot(&mut self, ctx: &mut impl Context) {
         self.x += 1;
 
-        if self.y < VISIBLE_HEIGHT && self.x == VISIBLE_WIDTH {
+        if self.y < SCREEN_HEIGHT && self.x == SCREEN_WIDTH {
             // TODO: HBLANK
             info!("Enter HBLANK: frame:{}, y:{:03}", self.frame, self.y);
 
@@ -207,13 +207,13 @@ impl Lcd {
             }
         }
 
-        if self.x >= SCREEN_WIDTH {
-            self.x -= SCREEN_WIDTH;
+        if self.x >= DOTS_PER_LINE {
+            self.x -= DOTS_PER_LINE;
             self.y += 1;
 
             trace!("Frame:{}, Line:{:03}", self.frame, self.y);
 
-            if self.y == VISIBLE_HEIGHT {
+            if self.y == SCREEN_HEIGHT {
                 // TODO: VBLANK
                 info!("Enter VBLANK: frame:{}", self.frame);
 
@@ -228,19 +228,19 @@ impl Lcd {
                 }
             }
 
-            if self.y >= SCREEN_HEIGHT {
-                self.y -= SCREEN_HEIGHT;
+            if self.y >= LINES_PER_FRAME {
+                self.y -= LINES_PER_FRAME;
                 self.frame += 1;
             }
         }
     }
 
     pub fn vblank(&self) -> bool {
-        self.y >= VISIBLE_HEIGHT
+        self.y >= SCREEN_HEIGHT
     }
 
     pub fn hblank(&self) -> bool {
-        self.y < VISIBLE_HEIGHT && self.x >= VISIBLE_WIDTH
+        self.y < SCREEN_HEIGHT && self.x >= SCREEN_WIDTH
     }
 
     fn vcount_match(&self) -> bool {
@@ -544,7 +544,7 @@ impl Lcd {
 impl Lcd {
     fn render_line(&mut self) {
         if self.force_blank {
-            for x in 0..VISIBLE_WIDTH {
+            for x in 0..SCREEN_WIDTH {
                 *self.frame_buf.pixel_mut(x, self.y) = Pixel::new(255, 255, 255);
             }
             return;
@@ -619,7 +619,7 @@ impl Lcd {
 
         self.color_special_effect();
 
-        for x in 0..VISIBLE_WIDTH {
+        for x in 0..SCREEN_WIDTH {
             *self.frame_buf.pixel_mut(x, self.y) =
                 Pixel::from_u16(self.line_buf.finished[x as usize]);
         }
@@ -643,7 +643,7 @@ impl Lcd {
         let scry = by / 32 % vscrs;
         let by = by % 32;
 
-        for x in 0..VISIBLE_WIDTH {
+        for x in 0..SCREEN_WIDTH {
             let cx = self.bg[i].hofs as u32 + x;
             let ox = cx % 8;
             let bx = cx / 8;
@@ -724,7 +724,7 @@ impl Lcd {
         let mut cx = sign_extend(self.bg[i].x, 27) + self.y as i32 * dmx;
         let mut cy = sign_extend(self.bg[i].y, 27) + self.y as i32 * dmy;
 
-        for x in 0..VISIBLE_WIDTH {
+        for x in 0..SCREEN_WIDTH {
             let x2 = (cx >> 8) as u32 & (size - 1);
             let y2 = (cy >> 8) as u32 & (size - 1);
 
@@ -771,7 +771,7 @@ impl Lcd {
             0xA000
         } + self.y * 0xF0;
 
-        for x in 0..VISIBLE_WIDTH {
+        for x in 0..SCREEN_WIDTH {
             let col_num = self.vram[base_addr as usize + x as usize];
             if col_num != 0 {
                 self.line_buf.bg[i][x as usize] = self.bg_palette256(col_num as _);
@@ -795,9 +795,9 @@ impl Lcd {
         }
 
         let num_of_hdots = if !self.hblank_obj_process {
-            SCREEN_WIDTH
+            DOTS_PER_LINE
         } else {
-            VISIBLE_WIDTH
+            SCREEN_WIDTH
         };
 
         let mut avail_cycle = num_of_hdots * 4 - 6;
@@ -826,6 +826,11 @@ impl Lcd {
             }
 
             let mosaic = oam[1] & 0x10 != 0;
+
+            if mosaic {
+                todo!("Mosaic support");
+            }
+
             let color_256 = oam[1] & 0x20 != 0;
 
             let shape = (oam[1] >> 6) & 3;
@@ -952,7 +957,7 @@ impl Lcd {
                     } else {
                         // 1-dim
 
-                        todo!();
+                        todo!("Obj: Normal 256 color 1-dim");
                     }
                 }
             } else {
@@ -1009,7 +1014,7 @@ impl Lcd {
                     } else {
                         // 1-dim
 
-                        todo!();
+                        todo!("Obj: Normal 16 color 1-dim");
                     }
                 } else {
                     if !self.obj_format {
@@ -1053,7 +1058,7 @@ impl Lcd {
                     } else {
                         // 1-dim
 
-                        todo!();
+                        todo!("Obj: Normal 256 color 1-dim");
                     }
                 }
             }
@@ -1119,27 +1124,30 @@ impl Lcd {
 
     fn eval_priority(&mut self) {
         if self.y == 0 {
-            eprintln!("Eval priority:");
+            trace!("Eval priority:");
 
             for i in 0..2 {
-                eprintln!("  - Window {i}:");
-                eprintln!(
+                trace!("  - Window {i}:");
+                trace!(
                     "    - region: ({}, {}) - ({}, {})",
-                    self.window[i].l, self.window[i].u, self.window[i].r, self.window[i].d,
+                    self.window[i].l,
+                    self.window[i].u,
+                    self.window[i].r,
+                    self.window[i].d,
                 );
-                eprintln!("    - display: {}", self.display_window[i],);
-                eprintln!("    - ctrl: {:?}", self.winin[i]);
+                trace!("    - display: {}", self.display_window[i],);
+                trace!("    - ctrl: {:?}", self.winin[i]);
             }
 
-            eprintln!(" - Objwin:");
-            eprintln!("    - display: {}", self.display_obj_window);
-            eprintln!("    - ctrl: {:?}", self.objwin);
+            trace!(" - Objwin:");
+            trace!("    - display: {}", self.display_obj_window);
+            trace!("    - ctrl: {:?}", self.objwin);
 
-            eprintln!(" - Winout:");
-            eprintln!("    - ctrl: {:?}", self.winout);
+            trace!(" - Winout:");
+            trace!("    - ctrl: {:?}", self.winout);
 
-            eprintln!("  - Display BG:  {:?}", self.display_bg,);
-            eprintln!("  - Display Obj: {}", self.display_obj);
+            trace!("  - Display BG:  {:?}", self.display_bg,);
+            trace!("  - Display Obj: {}", self.display_obj);
         }
 
         let y_in_win0 = self.display_window[0]
@@ -1160,7 +1168,7 @@ impl Lcd {
 
         // FIXME: how to use color special effect flag on window?
 
-        for x in 0..VISIBLE_WIDTH {
+        for x in 0..SCREEN_WIDTH {
             let in_win0 = y_in_win0 && self.window[0].l as u32 <= x && x <= self.window[0].r as u32;
             let in_win1 = y_in_win1 && self.window[1].l as u32 <= x && x <= self.window[1].r as u32;
 
@@ -1224,7 +1232,7 @@ impl Lcd {
 
         // eprintln!("Color special effect: backdrop: 0x{:04X}", back_drop);
 
-        for x in 0..VISIBLE_WIDTH {
+        for x in 0..SCREEN_WIDTH {
             let x = x as usize;
             let (ty, col) = if self.line_buf.surface_priority[0][x] == 4 {
                 (0, back_drop)

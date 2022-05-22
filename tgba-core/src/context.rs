@@ -30,6 +30,12 @@ pub trait Lcd {
 
 #[delegatable_trait]
 pub trait Sound {
+    fn sound(&self) -> &sound::Sound;
+    fn sound_mut(&mut self) -> &mut sound::Sound;
+
+    fn sound_tick(&mut self);
+    fn sound_timer_overflow(&mut self, ch: u8);
+
     fn sound_read8(&mut self, addr: u32) -> u8;
     fn sound_read16(&mut self, addr: u32) -> u16;
 
@@ -41,6 +47,12 @@ pub trait Sound {
 pub trait Interrupt {
     fn interrupt(&self) -> &interrupt::Interrupt;
     fn interrupt_mut(&mut self) -> &mut interrupt::Interrupt;
+}
+
+#[delegatable_trait]
+pub trait SoundDma {
+    fn sound_dma_request(&self, ch: u8) -> bool;
+    fn set_sound_dma_request(&mut self, ch: u8, data: bool);
 }
 
 #[delegatable_trait]
@@ -75,7 +87,11 @@ impl Context {
                 inner: Inner2 {
                     lcd,
                     sound,
-                    inner: Inner3 { interrupt, now: 0 },
+                    inner: Inner3 {
+                        interrupt,
+                        sound_dma_request: [false, false],
+                        now: 0,
+                    },
                 },
             },
         }
@@ -127,6 +143,7 @@ impl Bus for Inner {
 
 #[derive(Delegate)]
 #[delegate(Interrupt, target = "inner")]
+#[delegate(SoundDma, target = "inner")]
 #[delegate(Timing, target = "inner")]
 pub struct Inner2 {
     lcd: lcd::Lcd,
@@ -138,7 +155,6 @@ impl Lcd for Inner2 {
     fn lcd(&self) -> &lcd::Lcd {
         &self.lcd
     }
-
     fn lcd_mut(&mut self) -> &mut lcd::Lcd {
         &mut self.lcd
     }
@@ -150,25 +166,35 @@ impl Lcd for Inner2 {
     fn lcd_read16(&mut self, addr: u32) -> u16 {
         self.lcd.read16(&mut self.inner, addr)
     }
-
     fn lcd_write16(&mut self, addr: u32, data: u16) {
         self.lcd.write16(&mut self.inner, addr, data)
     }
 }
 
 impl Sound for Inner2 {
+    fn sound(&self) -> &sound::Sound {
+        &self.sound
+    }
+    fn sound_mut(&mut self) -> &mut sound::Sound {
+        &mut self.sound
+    }
+
+    fn sound_tick(&mut self) {
+        self.sound.tick(&mut self.inner);
+    }
+    fn sound_timer_overflow(&mut self, ch: u8) {
+        self.sound.timer_overflow(&mut self.inner, ch);
+    }
+
     fn sound_read8(&mut self, addr: u32) -> u8 {
         self.sound.read8(&mut self.inner, addr)
     }
-
     fn sound_read16(&mut self, addr: u32) -> u16 {
         self.sound.read16(&mut self.inner, addr)
     }
-
     fn sound_write8(&mut self, addr: u32, data: u8) {
         self.sound.write8(&mut self.inner, addr, data)
     }
-
     fn sound_write16(&mut self, addr: u32, data: u16) {
         self.sound.write16(&mut self.inner, addr, data)
     }
@@ -176,6 +202,7 @@ impl Sound for Inner2 {
 
 pub struct Inner3 {
     interrupt: interrupt::Interrupt,
+    sound_dma_request: [bool; 2],
     now: u64,
 }
 
@@ -185,6 +212,16 @@ impl Interrupt for Inner3 {
     }
     fn interrupt_mut(&mut self) -> &mut interrupt::Interrupt {
         &mut self.interrupt
+    }
+}
+
+impl SoundDma for Inner3 {
+    fn sound_dma_request(&self, ch: u8) -> bool {
+        self.sound_dma_request[ch as usize]
+    }
+
+    fn set_sound_dma_request(&mut self, ch: u8, data: bool) {
+        self.sound_dma_request[ch as usize] = data;
     }
 }
 
