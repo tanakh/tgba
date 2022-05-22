@@ -913,23 +913,6 @@ impl Lcd {
                 );
             }
 
-            // // for Debugging
-            // if self.y == y_range.0 || self.y + 1 == y_range.1 {
-            //     for dx in 0..w {
-            //         let cx = ((x + dx) % 512) as usize;
-            //         if cx >= 240 {
-            //             continue;
-            //         }
-            //         self.put_obj_pixel256(cx, 1, mode, priority);
-            //     }
-            // }
-            // if x < 240 {
-            //     self.put_obj_pixel256(x as _, 1, mode, priority);
-            // }
-            // if (x + w - 1) % 512 < 240 {
-            //     self.put_obj_pixel256(((x + w - 1) % 512) as _, 1, mode, priority);
-            // }
-
             // TODO: how many cycles for invisible objs?
             avail_cycle -= min(avail_cycle, num_of_render_cycle(w, rot));
 
@@ -943,7 +926,7 @@ impl Lcd {
         &mut self,
         hflip: bool,
         vflip: bool,
-        color_256: bool,
+        color256: bool,
         palette_num: u8,
         mode: u8,
         priority: u8,
@@ -954,35 +937,26 @@ impl Lcd {
         rely: u32,
     ) {
         let dim2 = !self.obj_format;
-
         let dy = if !vflip { rely } else { h - 1 - rely };
+
         for relx in 0..w {
-            let cx = ((x + relx) % 512) as usize;
-            if cx >= 240 {
+            let sx = ((x + relx) % 512) as usize;
+            if sx >= 240 {
                 continue;
             }
             let dx = if !hflip { relx } else { w - 1 - relx };
 
-            if !color_256 {
-                let tile_num = if dim2 {
-                    char_name + (dy / 8) * 32 + dx / 8
+            let col_num = if !color256 {
+                let c = self.get_obj_pixel16(char_name, dx, dy, w, dim2);
+                if c != 0 {
+                    palette_num * 16 + c
                 } else {
-                    char_name + (dy / 8) * (w / 8) + dx / 8
-                };
-                let addr = tile_num * 32 + (dy % 8) * 4 + dx % 8 / 2;
-                let col_num = (self.vram[(OBJ_BASE_ADDR + addr) as usize] >> (dx % 2 * 4)) & 0xf;
-                self.put_obj_pixel16(cx, palette_num, col_num, mode, priority);
+                    0
+                }
             } else {
-                let tile_num = if dim2 {
-                    // On 256 color and 2-dimensional mode, char name must be even number
-                    (char_name & !1) + (dy / 8) * 32 + dx / 8 * 2
-                } else {
-                    char_name + ((dy / 8) * (w / 8) + dx / 8) * 2
-                };
-                let addr = tile_num * 32 + (dy % 8) * 8 + dx % 8;
-                let col_num = self.vram[(OBJ_BASE_ADDR + addr) as usize];
-                self.put_obj_pixel256(cx, col_num, mode, priority);
-            }
+                self.get_obj_pixel256(char_name, dx, dy, w, dim2)
+            };
+            self.put_obj_pixel(sx, col_num, mode, priority);
         }
     }
 
@@ -1001,6 +975,8 @@ impl Lcd {
         x: u32,
         rely: u32,
     ) {
+        let dim2 = !self.obj_format;
+
         let rot_param_base = rot_param_num as usize * 32;
         let rot_param = &self.oam[rot_param_base..rot_param_base + 32];
         let dx = i16::from_le_bytes(rot_param[6..8].try_into().unwrap()) as i32;
@@ -1008,189 +984,94 @@ impl Lcd {
         let dy = i16::from_le_bytes(rot_param[22..24].try_into().unwrap()) as i32;
         let dmy = i16::from_le_bytes(rot_param[30..32].try_into().unwrap()) as i32;
 
-        if !color_256 {
-            if !self.obj_format {
-                // 2-dim
+        let mut rx = (ow as i32 / 2) << 8;
+        let mut ry = (oh as i32 / 2) << 8;
 
-                let tx = char_name % 32;
-                let ty = char_name / 32;
+        let rdx = -(w as i32 / 2);
+        rx += dx * rdx;
+        ry += dy * rdx;
 
-                let mut rx = (ow as i32 / 2) << 8;
-                let mut ry = (oh as i32 / 2) << 8;
+        let rdy = rely as i32 - (h as i32 / 2);
+        rx += dmx * rdy;
+        ry += dmy * rdy;
 
-                let rdx = -(w as i32 / 2);
-                rx += dx * rdx;
-                ry += dy * rdx;
+        for i in 0..w {
+            let sx = ((x + i) % 512) as usize;
+            if sx >= 240 {
+                continue;
+            }
 
-                let rdy = rely as i32 - (h as i32 / 2);
-                rx += dmx * rdy;
-                ry += dmy * rdy;
+            let rx2 = (rx + dx * i as i32) >> 8;
+            let ry2 = (ry + dy * i as i32) >> 8;
 
-                for i in 0..w {
-                    let sx = ((x + i) % 512) as usize;
-                    if sx >= 240 {
-                        continue;
-                    }
+            if !(rx2 >= 0 && rx2 < ow as i32 && ry2 >= 0 && ry2 < oh as i32) {
+                continue;
+            }
 
-                    let rx2 = (rx + dx * i as i32) >> 8;
-                    let ry2 = (ry + dy * i as i32) >> 8;
+            let rx2 = rx2 as u32;
+            let ry2 = ry2 as u32;
 
-                    if !(rx2 >= 0 && rx2 < ow as i32 && ry2 >= 0 && ry2 < oh as i32) {
-                        continue;
-                    }
-
-                    let rx2 = rx2 as u32;
-                    let ry2 = ry2 as u32;
-
-                    let tile_num = (ty + ry2 / 8) * 32 + tx + rx2 / 8;
-                    let addr = tile_num * 32 + (ry2 % 8) * 4 + rx2 % 8 / 2;
-                    let col_num =
-                        (self.vram[(OBJ_BASE_ADDR + addr) as usize] >> (rx2 % 2 * 4)) & 0xf;
-                    self.put_obj_pixel16(sx, palette_num, col_num, mode, priority);
+            let col_num = if !color_256 {
+                let col_num = self.get_obj_pixel16(char_name, rx2, ry2, ow, dim2);
+                if col_num != 0 {
+                    palette_num * 16 + col_num
+                } else {
+                    0
                 }
             } else {
-                // 1-dim
+                self.get_obj_pixel256(char_name, rx2, ry2, ow, dim2)
+            };
+            self.put_obj_pixel(sx, col_num, mode, priority);
+        }
+    }
 
-                let mut rx = (ow as i32 / 2) << 8;
-                let mut ry = (oh as i32 / 2) << 8;
-
-                let rdx = -(w as i32 / 2);
-                rx += dx * rdx;
-                ry += dy * rdx;
-
-                let rdy = rely as i32 - (h as i32 / 2);
-                rx += dmx * rdy;
-                ry += dmy * rdy;
-
-                for i in 0..w {
-                    let sx = ((x + i) % 512) as usize;
-                    if sx >= 240 {
-                        continue;
-                    }
-
-                    let rx2 = (rx + dx * i as i32) >> 8;
-                    let ry2 = (ry + dy * i as i32) >> 8;
-
-                    if !(rx2 >= 0 && rx2 < ow as i32 && ry2 >= 0 && ry2 < oh as i32) {
-                        continue;
-                    }
-
-                    let rx2 = rx2 as u32;
-                    let ry2 = ry2 as u32;
-
-                    let tile_num = char_name + (ry2 / 8) * (ow / 8) + rx2 / 8;
-                    let addr = tile_num * 32 + (ry2 % 8) * 4 + rx2 % 8 / 2;
-                    let col_num =
-                        (self.vram[(OBJ_BASE_ADDR + addr) as usize] >> (rx2 % 2 * 4)) & 0xf;
-                    self.put_obj_pixel16(sx, palette_num, col_num, mode, priority);
-                }
-            }
+    fn get_obj_pixel16(&self, char_name: u32, x: u32, y: u32, w: u32, dim2: bool) -> u8 {
+        let tile_num = if dim2 {
+            char_name + (y / 8) * 32 + x / 8
         } else {
-            if !self.obj_format {
-                // 2-dim
-                let tx = (char_name % 32) & !1;
-                let ty = char_name / 32;
-
-                let mut rx = (ow as i32 / 2) << 8;
-                let mut ry = (oh as i32 / 2) << 8;
-
-                let rdx = -(w as i32 / 2);
-                rx += dx * rdx;
-                ry += dy * rdx;
-
-                let rdy = rely as i32 - (h as i32 / 2);
-                rx += dmx * rdy;
-                ry += dmy * rdy;
-
-                for i in 0..w {
-                    let sx = ((x + i) % 512) as usize;
-                    if sx >= 240 {
-                        continue;
-                    }
-
-                    let rx2 = (rx + dx * i as i32) >> 8;
-                    let ry2 = (ry + dy * i as i32) >> 8;
-
-                    if !(rx2 >= 0 && rx2 < ow as i32 && ry2 >= 0 && ry2 < oh as i32) {
-                        continue;
-                    }
-
-                    let rx2 = rx2 as u32;
-                    let ry2 = ry2 as u32;
-
-                    let tile_num = (ty + ry2 / 8) * 32 + tx + rx2 / 8 * 2;
-                    let addr = tile_num * 32 + (ry2 % 8) * 8 + rx2 % 8;
-                    let col_num = self.vram[(OBJ_BASE_ADDR + addr) as usize];
-                    self.put_obj_pixel256(sx, col_num, mode, priority);
-                }
-            } else {
-                // 1-dim
-                let mut rx = (ow as i32 / 2) << 8;
-                let mut ry = (oh as i32 / 2) << 8;
-
-                let rdx = -(w as i32 / 2);
-                rx += dx * rdx;
-                ry += dy * rdx;
-
-                let rdy = rely as i32 - (h as i32 / 2);
-                rx += dmx * rdy;
-                ry += dmy * rdy;
-
-                for i in 0..w {
-                    let sx = ((x + i) % 512) as usize;
-                    if sx >= 240 {
-                        continue;
-                    }
-
-                    let rx2 = (rx + dx * i as i32) >> 8;
-                    let ry2 = (ry + dy * i as i32) >> 8;
-
-                    if !(rx2 >= 0 && rx2 < ow as i32 && ry2 >= 0 && ry2 < oh as i32) {
-                        continue;
-                    }
-
-                    let rx2 = rx2 as u32;
-                    let ry2 = ry2 as u32;
-
-                    let tile_num = char_name + (ry2 / 8) * (ow / 8) * 2 + rx2 / 8 * 2;
-                    let addr = tile_num * 32 + (ry2 % 8) * 8 + rx2 % 8;
-                    let col_num = self.vram[(OBJ_BASE_ADDR + addr) as usize];
-                    self.put_obj_pixel256(sx, col_num, mode, priority);
-                }
-            }
-        }
+            char_name + (y / 8) * (w / 8) + x / 8
+        };
+        let addr = tile_num * 32 + (y % 8) * 4 + x % 8 / 2;
+        (self.vram[(OBJ_BASE_ADDR + addr) as usize] >> (x % 2 * 4)) & 0xf
     }
 
-    fn put_obj_pixel16(&mut self, x: usize, palette_num: u8, col_num: u8, mode: u8, priority: u8) {
-        if col_num != 0 {
-            self.put_obj_pixel256(x, palette_num * 16 + col_num, mode, priority);
-        }
+    fn get_obj_pixel256(&self, char_name: u32, x: u32, y: u32, w: u32, dim2: bool) -> u8 {
+        let tile_num = if dim2 {
+            // On 256 color and 2-dimensional mode, char name must be even number
+            (char_name & !1) + (y / 8) * 32 + x / 8 * 2
+        } else {
+            char_name + ((y / 8) * (w / 8) + x / 8) * 2
+        };
+        let addr = tile_num * 32 + (y % 8) * 8 + x % 8;
+        self.vram[(OBJ_BASE_ADDR + addr) as usize]
     }
 
-    fn put_obj_pixel256(&mut self, x: usize, col_num: u8, mode: u8, priority: u8) {
-        if col_num != 0 {
-            let col = self.obj_palette256(col_num as _);
-            match mode {
-                // normal
-                0 => {
-                    if self.line_buf.obj[x] & 0x8000 != 0 {
-                        self.line_buf.obj[x] = col;
-                        self.line_buf.obj_attr[x].set_priority(priority);
-                        self.line_buf.obj_attr[x].set_semi_transparent(false);
-                    }
+    fn put_obj_pixel(&mut self, x: usize, col_num: u8, mode: u8, priority: u8) {
+        if col_num == 0 {
+            return;
+        }
+
+        let col = self.obj_palette256(col_num as _);
+        match mode {
+            // normal
+            0 => {
+                if self.line_buf.obj[x] & 0x8000 != 0 {
+                    self.line_buf.obj[x] = col;
+                    self.line_buf.obj_attr[x].set_priority(priority);
+                    self.line_buf.obj_attr[x].set_semi_transparent(false);
                 }
-                // semi-trans
-                1 => {
-                    if self.line_buf.obj[x] & 0x8000 != 0 {
-                        self.line_buf.obj[x] = col;
-                        self.line_buf.obj_attr[x].set_priority(priority);
-                        self.line_buf.obj_attr[x].set_semi_transparent(true);
-                    }
-                }
-                // obj-window
-                2 => self.line_buf.obj_attr[x].set_window(true),
-                _ => unreachable!(),
             }
+            // semi-trans
+            1 => {
+                if self.line_buf.obj[x] & 0x8000 != 0 {
+                    self.line_buf.obj[x] = col;
+                    self.line_buf.obj_attr[x].set_priority(priority);
+                    self.line_buf.obj_attr[x].set_semi_transparent(true);
+                }
+            }
+            // obj-window
+            2 => self.line_buf.obj_attr[x].set_window(true),
+            _ => unreachable!(),
         }
     }
 
@@ -1369,10 +1250,6 @@ impl Lcd {
 
     fn obj_palette256(&self, i: usize) -> u16 {
         self.bg_palette256(256 + i)
-    }
-
-    fn obj_palette16(&self, i: usize, j: usize) -> u16 {
-        self.bg_palette256(256 + i * 16 + j)
     }
 }
 
