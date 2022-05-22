@@ -881,17 +881,17 @@ impl Lcd {
                 let palette_num = oam[5] >> 4;
 
                 self.render_normal_obj(
-                    vflip,
-                    rely,
-                    h,
-                    color_256,
-                    char_name,
-                    w,
-                    x,
                     hflip,
+                    vflip,
+                    color_256,
                     palette_num,
                     mode,
                     priority,
+                    char_name,
+                    w,
+                    h,
+                    x,
+                    rely,
                 );
             } else {
                 let rot_param_num = (oam[3] >> 1) & 0x1F;
@@ -900,6 +900,9 @@ impl Lcd {
                 self.render_rotate_obj(
                     rot_param_num,
                     color_256,
+                    palette_num,
+                    mode,
+                    priority,
                     char_name,
                     ow,
                     oh,
@@ -907,9 +910,6 @@ impl Lcd {
                     h,
                     x,
                     rely,
-                    palette_num,
-                    mode,
-                    priority,
                 );
             }
 
@@ -941,92 +941,47 @@ impl Lcd {
 
     fn render_normal_obj(
         &mut self,
-        vflip: bool,
-        rely: u32,
-        h: u32,
-        color_256: bool,
-        char_name: u32,
-        w: u32,
-        x: u32,
         hflip: bool,
+        vflip: bool,
+        color_256: bool,
         palette_num: u8,
         mode: u8,
         priority: u8,
+        char_name: u32,
+        w: u32,
+        h: u32,
+        x: u32,
+        rely: u32,
     ) {
+        let dim2 = !self.obj_format;
+
         let dy = if !vflip { rely } else { h - 1 - rely };
-        if !color_256 {
-            if !self.obj_format {
-                // 2-dim
-                let l_char = char_name + (dy / 8) * 32;
-
-                for relx in 0..w {
-                    let cx = ((x + relx) % 512) as usize;
-                    if cx >= 240 {
-                        continue;
-                    }
-
-                    let dx = if !hflip { relx } else { w - 1 - relx };
-                    let bx = dx / 8;
-                    let ox = dx % 8;
-                    let addr = (l_char + bx) * 32 + (dy % 8) * 4 + ox / 2;
-                    let col_num =
-                        (self.vram[(OBJ_BASE_ADDR + addr) as usize] >> (ox % 2 * 4)) & 0xf;
-                    self.put_obj_pixel16(cx, palette_num, col_num, mode, priority);
-                }
-            } else {
-                // 1-dim
-                let l_char = char_name + (dy / 8) * (w / 8);
-
-                for relx in 0..w {
-                    let cx = ((x + relx) % 512) as usize;
-                    if cx >= 240 {
-                        continue;
-                    }
-
-                    let dx = if !hflip { relx } else { w - 1 - relx };
-                    let bx = dx / 8;
-                    let ox = dx % 8;
-                    let addr = (l_char + bx) * 32 + (dy % 8) * 4 + ox / 2;
-                    let col_num =
-                        (self.vram[(OBJ_BASE_ADDR + addr) as usize] >> (ox % 2 * 4)) & 0xf;
-                    self.put_obj_pixel16(cx, palette_num, col_num, mode, priority);
-                }
+        for relx in 0..w {
+            let cx = ((x + relx) % 512) as usize;
+            if cx >= 240 {
+                continue;
             }
-        } else {
-            if !self.obj_format {
-                // 2-dim
-                // On 256 color and 2-dimensional mode,
-                // char name must be even number
+            let dx = if !hflip { relx } else { w - 1 - relx };
 
-                let tx = (char_name % 32) & !1;
-                let ty = char_name / 32;
-
-                for relx in 0..w {
-                    let cx = ((x + relx) % 512) as usize;
-                    if cx >= 240 {
-                        continue;
-                    }
-
-                    let dx = if !hflip { relx } else { w - 1 - relx };
-                    let tile_num = (ty + dy / 8) * 32 + tx + dx / 8 * 2;
-                    let addr = tile_num * 32 + (dy % 8) * 8 + dx % 8;
-                    let col_num = self.vram[(OBJ_BASE_ADDR + addr) as usize];
-                    self.put_obj_pixel256(cx, col_num, mode, priority);
-                }
+            if !color_256 {
+                let tile_num = if dim2 {
+                    char_name + (dy / 8) * 32 + dx / 8
+                } else {
+                    char_name + (dy / 8) * (w / 8) + dx / 8
+                };
+                let addr = tile_num * 32 + (dy % 8) * 4 + dx % 8 / 2;
+                let col_num = (self.vram[(OBJ_BASE_ADDR + addr) as usize] >> (dx % 2 * 4)) & 0xf;
+                self.put_obj_pixel16(cx, palette_num, col_num, mode, priority);
             } else {
-                // 1-dim
-                for relx in 0..w {
-                    let cx = ((x + relx) % 512) as usize;
-                    if cx >= 240 {
-                        continue;
-                    }
-
-                    let dx = if !hflip { relx } else { w - 1 - relx };
-                    let tile_num = char_name + (dy / 8) * (w / 8) * 2 + dx / 8 * 2;
-                    let addr = tile_num * 32 + (dy % 8) * 8 + dx % 8;
-                    let col_num = self.vram[(OBJ_BASE_ADDR + addr) as usize];
-                    self.put_obj_pixel256(cx, col_num, mode, priority);
-                }
+                let tile_num = if dim2 {
+                    // On 256 color and 2-dimensional mode, char name must be even number
+                    (char_name & !1) + (dy / 8) * 32 + dx / 8 * 2
+                } else {
+                    char_name + ((dy / 8) * (w / 8) + dx / 8) * 2
+                };
+                let addr = tile_num * 32 + (dy % 8) * 8 + dx % 8;
+                let col_num = self.vram[(OBJ_BASE_ADDR + addr) as usize];
+                self.put_obj_pixel256(cx, col_num, mode, priority);
             }
         }
     }
@@ -1035,6 +990,9 @@ impl Lcd {
         &mut self,
         rot_param_num: u8,
         color_256: bool,
+        palette_num: u8,
+        mode: u8,
+        priority: u8,
         char_name: u32,
         ow: u32,
         oh: u32,
@@ -1042,9 +1000,6 @@ impl Lcd {
         h: u32,
         x: u32,
         rely: u32,
-        palette_num: u8,
-        mode: u8,
-        priority: u8,
     ) {
         let rot_param_base = rot_param_num as usize * 32;
         let rot_param = &self.oam[rot_param_base..rot_param_base + 32];
@@ -1052,6 +1007,7 @@ impl Lcd {
         let dmx = i16::from_le_bytes(rot_param[14..16].try_into().unwrap()) as i32;
         let dy = i16::from_le_bytes(rot_param[22..24].try_into().unwrap()) as i32;
         let dmy = i16::from_le_bytes(rot_param[30..32].try_into().unwrap()) as i32;
+
         if !color_256 {
             if !self.obj_format {
                 // 2-dim
