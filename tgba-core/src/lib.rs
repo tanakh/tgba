@@ -9,6 +9,7 @@ mod interrupt;
 mod lcd;
 mod rom;
 mod sound;
+mod timer;
 mod util;
 
 use context::Context;
