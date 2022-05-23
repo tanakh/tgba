@@ -81,6 +81,18 @@ impl Default for LineBuf {
     }
 }
 
+impl LineBuf {
+    fn clear(&mut self) {
+        self.obj_attr.fill(ObjAttr::default());
+        self.obj.fill(0x8000);
+        for i in 0..4 {
+            self.bg[i].fill(0x8000);
+        }
+        self.surface_priority[0].fill(4);
+        self.surface_priority[1].fill(4);
+    }
+}
+
 #[derive(Default)]
 struct Bg {
     priority: u8,
@@ -387,6 +399,8 @@ impl Lcd {
                 self.display_window[0] = v[13];
                 self.display_window[1] = v[14];
                 self.display_obj_window = v[15];
+
+                eprintln!("Set BG mode: {} at line: {}", self.bg_mode, self.y);
             }
             0x002 => {}
 
@@ -552,13 +566,7 @@ impl Lcd {
             return;
         }
 
-        self.line_buf.obj_attr.fill(ObjAttr::default());
-        self.line_buf.obj.fill(0x8000);
-        for i in 0..4 {
-            self.line_buf.bg[i].fill(0x8000);
-        }
-        self.line_buf.surface_priority[0].fill(4);
-        self.line_buf.surface_priority[1].fill(4);
+        self.line_buf.clear();
 
         trace!("Render line: y = {}, mode = {}", self.y, self.bg_mode);
 
@@ -638,7 +646,14 @@ impl Lcd {
         let screen_base_addr = self.bg[i].screen_base_block as usize * 0x800;
         let char_base_addr = self.bg[i].char_base_block as usize * 0x4000;
 
-        let cy = self.bg[i].vofs as u32 + self.y;
+        let scry = if self.bg[i].mosaic {
+            let mh = self.bg_mosaic_v as u32 + 1;
+            self.y / mh * mh
+        } else {
+            self.y
+        };
+
+        let cy = self.bg[i].vofs as u32 + scry;
         let oy = cy % 8;
         let by = cy / 8;
 
@@ -646,7 +661,14 @@ impl Lcd {
         let by = by % 32;
 
         for x in 0..SCREEN_WIDTH {
-            let cx = self.bg[i].hofs as u32 + x;
+            let relx = if self.bg[i].mosaic {
+                let mw = self.bg_mosaic_h as u32 + 1;
+                x / mw * mw
+            } else {
+                x
+            };
+
+            let cx = self.bg[i].hofs as u32 + relx;
             let ox = cx % 8;
             let bx = cx / 8;
 
@@ -656,11 +678,6 @@ impl Lcd {
             let scrid = scry * hscrs + scrx;
             let screen_base_addr = screen_base_addr + scrid as usize * 0x800;
             let block_addr = screen_base_addr + by as usize * 64 + bx as usize * 2;
-
-            // assert!(
-            //     screen_base_addr + block_addr < self.vram.len(),
-            //     "screen_base_addr = {screen_base_addr:08X}, block_addr = {block_addr:08X}"
-            // );
 
             let b0 = self.vram[block_addr];
             let b1 = self.vram[block_addr + 1];
@@ -675,7 +692,6 @@ impl Lcd {
 
             if !self.bg[i].color_mode {
                 // 16 x 16 color mode
-
                 assert!(char_base_addr + char * 32 + oy * 4 + ox / 2 < self.vram.len(), "too large index: char_base: {char_base_addr:08X}, char: 0x{char:03X}, ox: {ox}, oy: {oy}, b0: 0x{b0:02X}, b1: 0x{b1:02X}");
 
                 let tmp = self.vram[char_base_addr + char * 32 + oy * 4 + ox / 2];
@@ -706,29 +722,35 @@ impl Lcd {
         let screen_base_addr = self.bg[i].screen_base_block as usize * 0x800;
         let char_base_addr = self.bg[i].char_base_block as usize * 0x4000;
 
-        // TODO: mosaic
-
         let dx = self.bg[i].dx as i16 as i32;
         let dmx = self.bg[i].dmx as i16 as i32;
         let dy = self.bg[i].dy as i16 as i32;
         let dmy = self.bg[i].dmy as i16 as i32;
 
-        // eprintln!(
-        //     "BG{i}: size: {size}x{size}, refx: {refx}, refy: {refy}, dx = {dx}, dmx = {dmx}, dy = {dy}, dmy = {dmy}",
-        //     refx = sign_extend(self.bg[i].x, 27) as f64 / 256.0,
-        //     refy = sign_extend(self.bg[i].y, 27) as f64 / 256.0,
-        //     dx = dx as f64 / 256.0,
-        //     dmx = dmx as f64 / 256.0,
-        //     dy = dy as f64 / 256.0,
-        //     dmy = dmy as f64 / 256.0,
-        // );
-
         let cx = sign_extend(self.bg[i].x, 27);
         let cy = sign_extend(self.bg[i].y, 27);
 
+        self.bg[i].x = (cx + dmx) as u32 & 0x0FFFFFFF;
+        self.bg[i].y = (cy + dmy) as u32 & 0x0FFFFFFF;
+
+        let (cx, cy) = if self.bg[i].mosaic {
+            let mh = self.bg_mosaic_v as u32 + 1;
+            let mody = (self.y % mh) as i32;
+            (cx - dmx * mody, cy - dmy * mody)
+        } else {
+            (cx, cy)
+        };
+
         for x in 0..SCREEN_WIDTH {
-            let rx = (cx + dx * x as i32) >> 8;
-            let ry = (cy + dy * x as i32) >> 8;
+            let relx = if self.bg[i].mosaic {
+                let mw = self.bg_mosaic_h as u32 + 1;
+                x / mw * mw
+            } else {
+                x
+            };
+
+            let rx = (cx + dx * relx as i32) >> 8;
+            let ry = (cy + dy * relx as i32) >> 8;
 
             if !self.bg[i].area_overflow
                 && !(rx >= 0 && rx < size as i32 && ry >= 0 && ry < size as i32)
@@ -752,9 +774,6 @@ impl Lcd {
                 self.line_buf.bg[i][x as usize] = self.bg_palette256(col_num as _);
             }
         }
-
-        self.bg[i].x = (cx + dmx) as u32 & 0x0FFFFFFF;
-        self.bg[i].y = (cy + dmy) as u32 & 0x0FFFFFFF;
     }
 
     fn render_mode3_bg(&mut self) {
@@ -764,7 +783,16 @@ impl Lcd {
             return;
         }
 
-        todo!();
+        // TODO: Rotate
+        // TODO: Mosaic
+
+        let base_addr = self.y * 240 * 2;
+
+        for x in 0..SCREEN_WIDTH {
+            let addr = base_addr as usize + x as usize * 2;
+            let col = u16::from_le_bytes(self.vram[addr..addr + 2].try_into().unwrap());
+            self.line_buf.bg[i][x as usize] = col & 0x7FFF;
+        }
     }
 
     fn render_mode4_bg(&mut self) {
@@ -774,13 +802,10 @@ impl Lcd {
             return;
         }
 
-        let base_addr = if !self.display_frame_select {
-            0
-        } else {
-            0xA000
-        } + self.y * 0xF0;
-
         // TODO: Rotate
+        // TODO: Mosaic
+
+        let base_addr = self.frame_addr() + self.y * 240;
 
         for x in 0..SCREEN_WIDTH {
             let col_num = self.vram[base_addr as usize + x as usize];
@@ -797,7 +822,24 @@ impl Lcd {
             return;
         }
 
-        todo!();
+        // TODO: Rotate
+        // TODO: Mosaic
+
+        let base_addr = self.frame_addr() + self.y % 128 * 160 * 2;
+
+        for x in 0..SCREEN_WIDTH {
+            let addr = base_addr as usize + x as usize % 160 * 2;
+            let col = u16::from_le_bytes(self.vram[addr..addr + 2].try_into().unwrap());
+            self.line_buf.bg[i][x as usize] = col & 0x7FFF;
+        }
+    }
+
+    fn frame_addr(&self) -> u32 {
+        if !self.display_frame_select {
+            0
+        } else {
+            0xA000
+        }
     }
 
     fn render_obj(&mut self) {
@@ -834,14 +876,6 @@ impl Lcd {
                 continue;
             }
 
-            let mosaic = oam[1] & 0x10 != 0;
-
-            if mosaic {
-                todo!("Mosaic support");
-            }
-
-            let color_256 = oam[1] & 0x20 != 0;
-
             let shape = (oam[1] >> 6) & 3;
 
             // prohibited
@@ -872,17 +906,30 @@ impl Lcd {
 
             let priority = (oam[5] >> 2) & 3;
 
-            let rely = if y + h > 256 {
-                if !(self.y < y + h - 256) {
-                    continue;
-                }
-                256 + self.y - y
+            let color_256 = oam[1] & 0x20 != 0;
+
+            let mosaic = oam[1] & 0x10 != 0;
+
+            let scry = if mosaic {
+                let mosaic_h = self.obj_mosaic_v as u32 + 1;
+                self.y / mosaic_h * mosaic_h
             } else {
-                if !(y <= self.y && self.y < y + h) {
+                self.y
+            };
+
+            let rely = if y + h > 256 {
+                if !(scry < y + h - 256 && self.y < y + h - 256) {
                     continue;
                 }
-                self.y - y
+                256 + scry - y
+            } else {
+                if !(y <= scry && scry < y + h && y <= self.y && self.y < y + h) {
+                    continue;
+                }
+                scry - y
             };
+
+            let mosaic_w = if mosaic { self.obj_mosaic_h + 1 } else { 1 } as u32;
 
             if !rot {
                 let hflip = oam[3] & 0x10 != 0;
@@ -895,6 +942,7 @@ impl Lcd {
                     color_256,
                     palette_num,
                     mode,
+                    mosaic_w,
                     priority,
                     char_name,
                     w,
@@ -911,6 +959,7 @@ impl Lcd {
                     color_256,
                     palette_num,
                     mode,
+                    mosaic_w,
                     priority,
                     char_name,
                     ow,
@@ -938,6 +987,7 @@ impl Lcd {
         color256: bool,
         palette_num: u8,
         mode: u8,
+        mosaic_w: u32,
         priority: u8,
         char_name: u32,
         w: u32,
@@ -949,10 +999,16 @@ impl Lcd {
         let dy = if !vflip { rely } else { h - 1 - rely };
 
         for relx in 0..w {
-            let sx = ((x + relx) % 512) as usize;
+            let sx = (x + relx) % 512;
             if sx >= 240 {
                 continue;
             }
+            let scrx = sx / mosaic_w * mosaic_w;
+            let relx = if scrx < x { scrx + 512 - x } else { scrx - x };
+            if relx >= w {
+                continue;
+            }
+
             let dx = if !hflip { relx } else { w - 1 - relx };
 
             let col_num = if !color256 {
@@ -965,7 +1021,7 @@ impl Lcd {
             } else {
                 self.get_obj_pixel256(char_name, dx, dy, w, dim2)
             };
-            self.put_obj_pixel(sx, col_num, mode, priority);
+            self.put_obj_pixel(sx as _, col_num, mode, priority);
         }
     }
 
@@ -975,6 +1031,7 @@ impl Lcd {
         color_256: bool,
         palette_num: u8,
         mode: u8,
+        mosaic_w: u32,
         priority: u8,
         char_name: u32,
         ow: u32,
@@ -1005,13 +1062,15 @@ impl Lcd {
         ry += dmy * rdy;
 
         for i in 0..w {
-            let sx = ((x + i) % 512) as usize;
+            let sx = (x + i) % 512;
             if sx >= 240 {
                 continue;
             }
+            let scrx = sx / mosaic_w * mosaic_w;
+            let relx = if scrx < x { scrx + 512 - x } else { scrx - x } as i32;
 
-            let rx2 = (rx + dx * i as i32) >> 8;
-            let ry2 = (ry + dy * i as i32) >> 8;
+            let rx2 = (rx + dx * relx) >> 8;
+            let ry2 = (ry + dy * relx) >> 8;
 
             if !(rx2 >= 0 && rx2 < ow as i32 && ry2 >= 0 && ry2 < oh as i32) {
                 continue;
@@ -1030,7 +1089,7 @@ impl Lcd {
             } else {
                 self.get_obj_pixel256(char_name, rx2, ry2, ow, dim2)
             };
-            self.put_obj_pixel(sx, col_num, mode, priority);
+            self.put_obj_pixel(sx as _, col_num, mode, priority);
         }
     }
 
