@@ -104,24 +104,24 @@ impl Sound {
         self.prev_clock = now;
 
         // System clock = 16.78MHz
-        // Tick each channel at 131.072KHz
-        // Prescaler = 1/128
+        // Tick each channel at 1.046Mhz
+        // Prescaler = 1/16
 
         self.freq_counter += elapsed;
-        let ticks = self.freq_counter / 128;
-        self.freq_counter %= 128;
+        let ticks = self.freq_counter / 16;
+        self.freq_counter %= 16;
 
         for _ in 0..ticks {
-            self.tick_128k(ctx);
+            self.tick_1M(ctx);
         }
     }
 
-    fn tick_128k(&mut self, ctx: &mut impl Context) {
+    fn tick_1M(&mut self, ctx: &mut impl Context) {
         if self.power_on {
             self.frame_counter += 1;
 
-            // Count up at 512Hz (128K / 256 = 512)
-            let frame_seq_step = self.frame_counter / 256;
+            // Count up at 512Hz (1M / 2048 = 512KHz)
+            let frame_seq_step = self.frame_counter / 2048;
 
             // Step   Length Ctr  Vol Env     Sweep
             // ---------------------------------------
@@ -147,7 +147,7 @@ impl Sound {
         }
 
         // AUDIO_SAMPLE_PER_FRAME samples per DOTS_PER_LINE * LINES_PER_FRAME
-        const TICKS_PER_SECOND: u32 = 128 * 1024;
+        const TICKS_PER_SECOND: u32 = 1024 * 1024;
 
         self.sampling_counter += AUDIO_SAMPLES_PER_SECOND;
         if self.sampling_counter >= TICKS_PER_SECOND {
@@ -162,62 +162,53 @@ impl Sound {
             return AudioSample::new(0, 0);
         }
 
-        let dac = |output: Option<u8>| match output {
-            None => 0,
-            Some(output) => (output as i16 - 8) << 5,
-        };
-
         let ch_output = [
-            dac(self.pulse[0].output()),
-            dac(self.pulse[1].output()),
-            dac(self.wave.output()),
-            dac(self.noise.output()),
+            self.pulse[0].output(),
+            self.pulse[1].output(),
+            self.wave.output(),
+            self.noise.output(),
         ];
 
-        let mut output = [0, 0];
+        // normalize each channel to -2048..2047
 
-        for (i, out) in output.iter_mut().enumerate() {
-            for (j, ch_out) in ch_output.iter().enumerate() {
-                if self.channel_ctrl[i].output_ch[j] {
-                    *out += *ch_out;
-                }
-            }
-            *out *= self.channel_ctrl[i].volume as i16 + 1;
-        }
+        let mut cgb_output = [0, 0];
 
-        match self.output_ratio_gb {
-            0 => {
-                output[0] /= 4;
-                output[1] /= 4;
-            }
-            1 => {
-                output[0] /= 2;
-                output[1] /= 2;
-            }
-            2 => {}
-            _ => panic!("Invalid Output Ratio for GB sound"),
-        }
-
-        for i in 0..2 {
-            let out = match self.direct_sound[i].current_output {
-                None => 0,
-                Some(output) => (output as i8 as i16) << 1,
-            };
-
-            // eprintln!("DS[{i}] = {out}");
-
-            let ratio = if !self.output_ratio_direct_sound[i] {
-                2
-            } else {
-                1
-            };
-
-            for j in 0..2 {
-                if self.direct_sound[i].output[j] {
-                    output[j] += out * 64 / ratio;
+        for ch in 0..4 {
+            if let Some(output) = ch_output[ch] {
+                // cgb channel outputs' range is 0..15
+                let output = output as i32 * 256 - 2048;
+                for lr in 0..2 {
+                    if self.channel_ctrl[lr].output_ch[ch] {
+                        cgb_output[lr] += output * self.channel_ctrl[lr].volume as i32 / 8;
+                    }
                 }
             }
         }
+
+        let mut agb_output = [0, 0];
+
+        for ch in 0..2 {
+            if let Some(output) = self.direct_sound[ch].current_output {
+                // agb channel outputs' range is -128..127
+                let output = output as i8 as i32 * 16;
+                for lr in 0..2 {
+                    if self.direct_sound[ch].output[lr] {
+                        agb_output[lr] += output;
+                    }
+                }
+            }
+        }
+
+        assert_ne!(self.output_ratio_gb, 3, "Invalid Output Ratio for GB sound");
+        let cgb_amp = 1 << self.output_ratio_gb;
+
+        let output = [0, 1].map(|i| {
+            let agb_amp = self.output_ratio_direct_sound[i] as i32 + 1;
+            let output = cgb_output[i] * cgb_amp / 4 + agb_output[i] * agb_amp / 2 * 4;
+            (output * 2).clamp(-32768, 32767) as i16
+        });
+
+        // eprintln!("{cgb_output:6?} + {agb_output:6?} = {output:6?}");
 
         AudioSample::new(output[0], output[1])
     }
@@ -526,8 +517,9 @@ impl Pulse {
 #[derive(Default)]
 struct Wave {
     enable: bool,
-    length: u16,      // Sound Length = (256-t1)*(1/256) seconds
-    output_level: u8, // 0 => mute, 1 => 100%, 2 => 50%, 3 => 25%
+    length: u16,           // Sound Length = (256-t1)*(1/256) seconds
+    output_level: u8,      // 0 => mute, 1 => 100%, 2 => 50%, 3 => 25%
+    output_level_75: bool, // 1 => force output level to 75%
     frequency: u16,
     length_enable: bool,
     ram: [u8; 0x20],
@@ -552,11 +544,11 @@ impl Wave {
     }
 
     fn read_ram(&mut self, addr: u32) -> u8 {
-        self.ram[(self.ram_bank as usize) * 0x10 + addr as usize]
+        self.ram[(1 - self.ram_bank as usize) * 0x10 + addr as usize]
     }
 
     fn write_ram(&mut self, addr: u32, data: u8) {
-        self.ram[(self.ram_bank as usize) * 0x10 + addr as usize] = data;
+        self.ram[(1 - self.ram_bank as usize) * 0x10 + addr as usize] = data;
     }
 
     fn read(&mut self, regno: usize) -> u8 {
@@ -588,7 +580,11 @@ impl Wave {
             // NR31: Channel 3 Sound length (R/W)
             1 => self.length = 256 - data as u16,
             // NR32: Channel 3 Select output level (R/W)
-            2 => self.output_level = data.view_bits::<Lsb0>()[5..=6].load(),
+            2 => {
+                let v = data.view_bits::<Lsb0>();
+                self.output_level = v[5..=6].load();
+                self.output_level_75 = v[7];
+            }
             // NR33: Channel 3 Frequency lo (W)
             3 => self.frequency.view_bits_mut::<Lsb0>()[0..=7].store(data),
             // NR34: Channel 3 Frequency hi (R/W)
@@ -618,17 +614,21 @@ impl Wave {
         if self.length == 0 {
             self.length = 256;
         }
-        self.frequency_timer = (2048 - self.frequency) * 2;
+        self.frequency_timer = 2048 - self.frequency;
         self.pos = 0;
     }
 
     fn tick(&mut self, length_tick: bool) {
-        self.frequency_timer = self.frequency_timer.saturating_sub(1);
-        if self.frequency_timer == 0 {
-            self.frequency_timer = (2048 - self.frequency) * 2;
-            self.pos = (self.pos + 1) % 32;
-            let v = self.ram[self.pos as usize / 2];
-            self.sample_latch = if self.pos % 2 == 0 { v >> 4 } else { v & 0x0F };
+        for _ in 0..2 {
+            self.frequency_timer = self.frequency_timer.saturating_sub(1);
+            if self.frequency_timer == 0 {
+                self.frequency_timer = 2048 - self.frequency;
+                self.pos = (self.pos + 1) % 64;
+
+                let pos = (self.ram_bank as u8 * 32 + self.pos) % if !self.steps { 32 } else { 64 };
+                let v = self.ram[pos as usize / 2];
+                self.sample_latch = if pos % 2 == 0 { v >> 4 } else { v & 0x0F };
+            }
         }
 
         self.length_tick_in = length_tick;
@@ -659,11 +659,13 @@ impl Wave {
 
     fn output(&self) -> Option<u8> {
         if self.on {
-            Some(if self.output_level == 0 {
-                0
+            if self.output_level_75 {
+                Some(self.sample_latch * 3 / 4)
+            } else if self.output_level == 0 {
+                None
             } else {
-                self.sample_latch >> (self.output_level - 1)
-            })
+                Some(self.sample_latch >> (self.output_level - 1))
+            }
         } else {
             None
         }
@@ -778,21 +780,21 @@ impl Noise {
         }
         self.current_volume = self.initial_volume;
         self.lsfr = 0x7fff;
-        self.divisor_timer = DIVISOR[self.divisor_code as usize] / 2;
+        self.divisor_timer = DIVISOR[self.divisor_code as usize] / 8;
         self.shift_clock_timer = 1 << (self.clock_shift + 1);
 
-        log::debug!(
-            "NOISE ch trigger: {}Hz, divisor={}, shfit={}",
-            524288.0
-                / (if self.divisor_code == 0 {
-                    0.5
-                } else {
-                    self.divisor_code as f64
-                })
-                / 2.0_f64.powi(self.clock_shift as i32 + 1),
-            self.divisor_code,
-            self.clock_shift,
-        );
+        // log::debug!(
+        //     "NOISE ch trigger: {}Hz, divisor={}, shfit={}",
+        //     524288.0
+        //         / (if self.divisor_code == 0 {
+        //             0.5
+        //         } else {
+        //             self.divisor_code as f64
+        //         })
+        //         / 2.0_f64.powi(self.clock_shift as i32 + 1),
+        //     self.divisor_code,
+        //     self.clock_shift,
+        // );
     }
 
     fn tick(&mut self, length_tick: bool, envelope_tick: bool) {
@@ -804,7 +806,7 @@ impl Noise {
                 self.sample_acc += ((self.lsfr & 1) ^ 1) as usize;
                 self.sample_count += 1;
 
-                self.divisor_timer = DIVISOR[self.divisor_code as usize] / 2;
+                self.divisor_timer = DIVISOR[self.divisor_code as usize] / 8;
                 let b = (self.lsfr & 1) ^ ((self.lsfr >> 1) & 1);
                 self.lsfr = if !self.lsfr_width {
                     (self.lsfr >> 1) | (b << 14)
@@ -861,7 +863,7 @@ impl Noise {
     }
 
     fn output(&mut self) -> Option<u8> {
-        if !self.on {
+        if !self.on || self.current_volume == 0 {
             None
         } else {
             let sample_acc = self.sample_acc + ((self.lsfr & 1) ^ 1) as usize;
@@ -1012,9 +1014,29 @@ impl Sound {
                 0 => self.channel_ctrl[0].output_ch[0],
             },
 
+            // SOUNDCNT_H
+            0x082 => pack! {
+                0..=1 => self.output_ratio_gb,
+                2     => self.output_ratio_direct_sound[0],
+                3     => self.output_ratio_direct_sound[1],
+            },
+            0x083 => {
+                let mut data = 0;
+                let v = data.view_bits_mut::<Lsb0>();
+                for ch in 0..2 {
+                    v.set(ch * 4, self.direct_sound[ch].output[0]);
+                    v.set(ch * 4 + 1, self.direct_sound[ch].output[1]);
+                    v.set(ch * 4 + 2, self.direct_sound[ch].timer_ch != 0);
+                }
+                data
+            }
+
             // SOUNDBIAS
             0x088 => 0x00,
             0x089 => 0x02,
+
+            // Waveform RAM
+            0x090..=0x09F => self.wave.read_ram(addr & 0xF),
 
             _ => todo!("Sound read: 0x{addr:03X}"),
         };
@@ -1063,21 +1085,21 @@ impl Sound {
             // NR50: Channel control / ON-OFF / Volume (R/W)
             0x080 => {
                 let v = data.view_bits::<Lsb0>();
-                self.channel_ctrl[1].volume = v[4..=6].load();
                 self.channel_ctrl[0].volume = v[0..=2].load();
+                self.channel_ctrl[1].volume = v[4..=6].load();
             }
 
             // NR51: Selection of Sound output terminal (R/W)
             0x081 => {
                 let v = data.view_bits::<Lsb0>();
-                self.channel_ctrl[1].output_ch[3] = v[7];
-                self.channel_ctrl[1].output_ch[2] = v[6];
-                self.channel_ctrl[1].output_ch[1] = v[5];
-                self.channel_ctrl[1].output_ch[0] = v[4];
-                self.channel_ctrl[0].output_ch[3] = v[3];
-                self.channel_ctrl[0].output_ch[2] = v[2];
-                self.channel_ctrl[0].output_ch[1] = v[1];
                 self.channel_ctrl[0].output_ch[0] = v[0];
+                self.channel_ctrl[0].output_ch[1] = v[1];
+                self.channel_ctrl[0].output_ch[2] = v[2];
+                self.channel_ctrl[0].output_ch[3] = v[3];
+                self.channel_ctrl[1].output_ch[0] = v[4];
+                self.channel_ctrl[1].output_ch[1] = v[5];
+                self.channel_ctrl[1].output_ch[2] = v[6];
+                self.channel_ctrl[1].output_ch[3] = v[7];
             }
 
             // SOUNDCNT_H
@@ -1090,11 +1112,11 @@ impl Sound {
             0x083 => {
                 let v = data.view_bits::<Lsb0>();
                 for ch in 0..2 {
-                    self.direct_sound[0].output[0] = v[ch * 4];
-                    self.direct_sound[0].output[1] = v[ch * 4 + 1];
-                    self.direct_sound[0].timer_ch = v[ch * 4 + 2] as u8;
+                    self.direct_sound[ch].output[0] = v[ch * 4];
+                    self.direct_sound[ch].output[1] = v[ch * 4 + 1];
+                    self.direct_sound[ch].timer_ch = v[ch * 4 + 2] as u8;
                     if v[ch * 4 + 3] {
-                        self.direct_sound[0].reset();
+                        self.direct_sound[ch].reset();
                     }
                 }
             }
@@ -1109,7 +1131,7 @@ impl Sound {
             0x088 | 0x089 => {}
 
             // Waveform RAM
-            0x090..=0x09F => self.wave.write_ram(addr & 0xf, data),
+            0x090..=0x09F => self.wave.write_ram(addr & 0xF, data),
 
             // Sound FIFO
             0x0A0..=0x0A3 => self.direct_sound[0].push_fifo(data),
