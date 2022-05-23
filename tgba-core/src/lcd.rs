@@ -722,56 +722,24 @@ impl Lcd {
         let screen_base_addr = self.bg[i].screen_base_block as usize * 0x800;
         let char_base_addr = self.bg[i].char_base_block as usize * 0x4000;
 
-        let dx = self.bg[i].dx as i16 as i32;
-        let dmx = self.bg[i].dmx as i16 as i32;
-        let dy = self.bg[i].dy as i16 as i32;
-        let dmy = self.bg[i].dmy as i16 as i32;
-
-        let cx = sign_extend(self.bg[i].x, 27);
-        let cy = sign_extend(self.bg[i].y, 27);
-
-        self.bg[i].x = (cx + dmx) as u32 & 0x0FFFFFFF;
-        self.bg[i].y = (cy + dmy) as u32 & 0x0FFFFFFF;
-
-        let (cx, cy) = if self.bg[i].mosaic {
-            let mh = self.bg_mosaic_v as u32 + 1;
-            let mody = (self.y % mh) as i32;
-            (cx - dmx * mody, cy - dmy * mody)
-        } else {
-            (cx, cy)
-        };
+        let (cx, cy) = self.calc_left_for_line(i);
 
         for x in 0..SCREEN_WIDTH {
-            let relx = if self.bg[i].mosaic {
-                let mw = self.bg_mosaic_h as u32 + 1;
-                x / mw * mw
-            } else {
-                x
-            };
-
-            let rx = (cx + dx * relx as i32) >> 8;
-            let ry = (cy + dy * relx as i32) >> 8;
-
-            if !self.bg[i].area_overflow
-                && !(rx >= 0 && rx < size as i32 && ry >= 0 && ry < size as i32)
+            if let Some((rx, ry)) =
+                self.calc_refpoint_for_x(i, size, size, self.bg[i].area_overflow, x, cx, cy)
             {
-                continue;
-            }
+                let bx = (rx / 8) as usize;
+                let by = (ry / 8) as usize;
 
-            let rx = rx as u32 & (size - 1);
-            let ry = ry as u32 & (size - 1);
+                let ox = (rx % 8) as usize;
+                let oy = (ry % 8) as usize;
 
-            let bx = (rx / 8) as usize;
-            let by = (ry / 8) as usize;
+                let char = self.vram[screen_base_addr + by * bw + bx] as usize;
+                let col_num = self.vram[char_base_addr + char * 64 + oy * 8 + ox];
 
-            let ox = (rx % 8) as usize;
-            let oy = (ry % 8) as usize;
-
-            let char = self.vram[screen_base_addr + by * bw + bx] as usize;
-            let col_num = self.vram[char_base_addr + char * 64 + oy * 8 + ox];
-
-            if col_num != 0 {
-                self.line_buf.bg[i][x as usize] = self.bg_palette256(col_num as _);
+                if col_num != 0 {
+                    self.line_buf.bg[i][x as usize] = self.bg_palette256(col_num as _);
+                }
             }
         }
     }
@@ -783,15 +751,14 @@ impl Lcd {
             return;
         }
 
-        // TODO: Rotate
-        // TODO: Mosaic
-
-        let base_addr = self.y * 240 * 2;
+        let (cx, cy) = self.calc_left_for_line(i);
 
         for x in 0..SCREEN_WIDTH {
-            let addr = base_addr as usize + x as usize * 2;
-            let col = u16::from_le_bytes(self.vram[addr..addr + 2].try_into().unwrap());
-            self.line_buf.bg[i][x as usize] = col & 0x7FFF;
+            if let Some((rx, ry)) = self.calc_refpoint_for_x(i, 240, 160, false, x, cx, cy) {
+                let addr = (ry * 240 + rx) as usize * 2;
+                let col = u16::from_le_bytes(self.vram[addr..addr + 2].try_into().unwrap());
+                self.line_buf.bg[i][x as usize] = col & 0x7FFF;
+            }
         }
     }
 
@@ -802,15 +769,15 @@ impl Lcd {
             return;
         }
 
-        // TODO: Rotate
-        // TODO: Mosaic
-
-        let base_addr = self.frame_addr() + self.y * 240;
+        let base_addr = self.frame_addr();
+        let (cx, cy) = self.calc_left_for_line(i);
 
         for x in 0..SCREEN_WIDTH {
-            let col_num = self.vram[base_addr as usize + x as usize];
-            if col_num != 0 {
-                self.line_buf.bg[i][x as usize] = self.bg_palette256(col_num as _);
+            if let Some((rx, ry)) = self.calc_refpoint_for_x(i, 240, 160, false, x, cx, cy) {
+                let col_num = self.vram[(base_addr + (ry * 240 + rx)) as usize];
+                if col_num != 0 {
+                    self.line_buf.bg[i][x as usize] = self.bg_palette256(col_num as _);
+                }
             }
         }
     }
@@ -822,15 +789,66 @@ impl Lcd {
             return;
         }
 
-        // TODO: Rotate
-        // TODO: Mosaic
-
-        let base_addr = self.frame_addr() + self.y % 128 * 160 * 2;
+        let base_addr = self.frame_addr();
+        let (cx, cy) = self.calc_left_for_line(i);
 
         for x in 0..SCREEN_WIDTH {
-            let addr = base_addr as usize + x as usize % 160 * 2;
-            let col = u16::from_le_bytes(self.vram[addr..addr + 2].try_into().unwrap());
-            self.line_buf.bg[i][x as usize] = col & 0x7FFF;
+            if let Some((rx, ry)) = self.calc_refpoint_for_x(i, 160, 128, false, x, cx, cy) {
+                let addr = (base_addr + (ry * 160 + rx) * 2) as usize;
+                let col = u16::from_le_bytes(self.vram[addr..addr + 2].try_into().unwrap());
+                self.line_buf.bg[i][x as usize] = col & 0x7FFF;
+            }
+        }
+    }
+
+    fn calc_left_for_line(&mut self, i: usize) -> (i32, i32) {
+        let dmx = self.bg[i].dmx as i16 as i32;
+        let dmy = self.bg[i].dmy as i16 as i32;
+
+        let cx = sign_extend(self.bg[i].x, 27);
+        let cy = sign_extend(self.bg[i].y, 27);
+
+        self.bg[i].x = (cx + dmx) as u32 & 0x0FFFFFFF;
+        self.bg[i].y = (cy + dmy) as u32 & 0x0FFFFFFF;
+
+        if self.bg[i].mosaic {
+            let mh = self.bg_mosaic_v as u32 + 1;
+            let mody = (self.y % mh) as i32;
+            (cx - dmx * mody, cy - dmy * mody)
+        } else {
+            (cx, cy)
+        }
+    }
+
+    fn calc_refpoint_for_x(
+        &self,
+        i: usize,
+        w: u32,
+        h: u32,
+        wrapping: bool,
+        x: u32,
+        cx: i32,
+        cy: i32,
+    ) -> Option<(u32, u32)> {
+        let relx = if self.bg[i].mosaic {
+            let mw = self.bg_mosaic_h as u32 + 1;
+            x / mw * mw
+        } else {
+            x
+        };
+
+        let dx = self.bg[i].dx as i16 as i32;
+        let dy = self.bg[i].dy as i16 as i32;
+
+        let rx = (cx + dx * relx as i32) >> 8;
+        let ry = (cy + dy * relx as i32) >> 8;
+
+        if wrapping {
+            Some((rx as u32 % w, ry as u32 % h))
+        } else if rx >= 0 && rx < w as i32 && ry >= 0 && ry < h as i32 {
+            Some((rx as u32, ry as u32))
+        } else {
+            None
         }
     }
 
