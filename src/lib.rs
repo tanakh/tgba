@@ -27,7 +27,7 @@ use tgba_core::{Agb, KeyInput, Rom};
 
 const SCREEN_WIDTH: u32 = 240;
 const SCREEN_HEIGHT: u32 = 160;
-const SCALING: u32 = 2;
+const SCALING: u32 = 4;
 
 pub fn run(bios: &Path, rom: &Path) -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
@@ -223,7 +223,7 @@ fn load_rom(file: &Path) -> Result<Rom> {
 
 fn dump_rom_info(rom: &Rom) {
     let mut table = prettytable::table! {
-        ["Title", rom.title],
+        ["Title", String::from_utf8_lossy(&rom.title)],
         ["Game Code", String::from_utf8_lossy(&rom.game_code)],
         ["Maker Code", String::from_utf8_lossy(&rom.maker_code)],
         ["Main Unit Code", rom.main_unit_code],

@@ -1,6 +1,7 @@
 // #![feature(trace_macros)]
 
 mod backup;
+mod bios;
 mod bus;
 mod consts;
 mod context;

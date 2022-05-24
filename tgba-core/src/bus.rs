@@ -470,17 +470,16 @@ impl Bus {
             0x6 => {
                 warn!("Write 8bit data to VRAM: 0x{addr:08X} = 0x{data:02X}");
                 ctx.elapse(1);
-                let addr = vram_addr(addr) & !1;
-                ctx.lcd_mut().vram[addr] = data;
-                ctx.lcd_mut().vram[addr + 1] = data;
+                let addr = vram_addr(addr);
+                if addr < 0x10000 {
+                    ctx.lcd_mut().vram[addr] = data;
+                    ctx.lcd_mut().vram[addr + 1] = data;
+                }
             }
             0x7 => {
                 warn!("Write 8bit data to OAM: 0x{addr:08X} = 0x{data:02X}");
                 ctx.elapse(1);
-                let addr = (addr & 0x3FF) as usize;
-                // FIXME: This seems not correct
-                ctx.lcd_mut().oam[addr] = data;
-                // ctx.lcd_mut().oam[addr + 1] = data;
+                // This seems to be ignored
             }
 
             0x8..=0xD => warn!("Write 8bit data to ROM"),

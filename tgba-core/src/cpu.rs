@@ -1,8 +1,9 @@
 use bitvec::prelude::*;
-use log::{debug, info, trace, warn};
+use log::{debug, trace, warn};
 use std::mem::size_of;
 
 use crate::{
+    bios::trace_swi,
     context::{Bus, Interrupt, Timing},
     util::trait_alias,
 };
@@ -91,7 +92,7 @@ fn mode_name(mode: u8) -> &'static str {
     }
 }
 
-struct Registers {
+pub struct Registers {
     r: [u32; 16],
 
     n_flag: bool,
@@ -132,6 +133,10 @@ impl Default for Registers {
 }
 
 impl Registers {
+    pub fn r(&self, i: usize) -> u32 {
+        self.r[i]
+    }
+
     fn cpsr(&self) -> u32 {
         let mut ret = 0;
         ret |= (self.n_flag as u32) << 31;
@@ -271,6 +276,10 @@ impl<C: Context> Cpu<C> {
         }
     }
 
+    pub fn regs(&self) -> &Registers {
+        &self.regs
+    }
+
     pub fn set_pc(&mut self, pc: u32) {
         self.regs.r[15] = pc;
         self.pc_changed = true;
@@ -284,7 +293,7 @@ impl<C: Context> Cpu<C> {
         //     trace!("HB: {}", ctx.now());
         // }
 
-        // if ctx.now() > 1601629 - 10000 {
+        // if ctx.now() > 79130486 - 1000 {
         //     self.trace = true;
         // }
 
@@ -2142,7 +2151,8 @@ fn arm_disasm_swp(instr: u32, _pc: u32) -> String {
 }
 
 fn arm_op_swi<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u32) {
-    info!("SWI: {instr:08X}, cycle: {}", ctx.now());
+    trace!("Cycle: {}", ctx.now());
+    trace_swi(cpu, (instr >> 16) as u8, cpu.regs.r[15].wrapping_sub(8));
     cpu.exception(Exception::SoftwareInterrupt)
 }
 
@@ -2757,18 +2767,18 @@ fn block_trans<C: Context, const L: bool, const IA: bool, const R: bool>(
             } else {
                 cpu.regs.r[i]
             };
-            u32::store(ctx, addr, data, first);
+            ctx.write32(addr, data, first);
         } else {
-            cpu.regs.r[i] = u32::load(ctx, addr, first);
+            cpu.regs.r[i] = ctx.read32(addr, first);
         }
         first = false;
         addr = addr.wrapping_add(4);
     }
     if R {
         if !L {
-            u32::store(ctx, addr, cpu.regs.r[14], first);
+            ctx.write32(addr, cpu.regs.r[14], first);
         } else {
-            cpu.set_pc(u32::load(ctx, addr, first) & !1);
+            cpu.set_pc(ctx.read32(addr, first) & !1);
         }
         first = false;
     }
@@ -2805,9 +2815,9 @@ fn thumb_op_ldstm<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C, inst
     // Empty Rlist: R15 loaded/stored (ARMv4 only), and Rb=Rb+40h (ARMv4-v5).
     if rlist == 0 {
         if L {
-            cpu.set_pc(u32::load(ctx, cpu.regs.r[rb], true));
+            cpu.set_pc(ctx.read32(cpu.regs.r[rb], true));
         } else {
-            u32::store(ctx, cpu.regs.r[rb], cpu.regs.r[15].wrapping_add(4), true);
+            ctx.write32(cpu.regs.r[rb], cpu.regs.r[15].wrapping_add(4), true);
         }
         cpu.regs.r[rb] = cpu.regs.r[rb].wrapping_add(0x40);
     } else {
@@ -2831,8 +2841,6 @@ fn thumb_op_cond_branch<C: Context, const COND: usize>(cpu: &mut Cpu<C>, _ctx: &
 }
 
 fn thumb_disasm_cond_branch(instr: u16, pc: u32) -> String {
-    trace!("thumb_disasm_cond_branch: PC:{pc:08X}, instr:{instr:04X}");
-
     let cond = (instr >> 8) & 0xF;
     let offset = ((instr as i8) as i32 * 2 + 4) as u32;
     let dest = pc.wrapping_add(offset);
@@ -2840,7 +2848,8 @@ fn thumb_disasm_cond_branch(instr: u16, pc: u32) -> String {
 }
 
 fn thumb_op_swi<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
-    info!("SWI: {:04X}, cycle: {}", instr, ctx.now());
+    trace!("Cycle: {}", ctx.now());
+    trace_swi(cpu, instr as u8, cpu.regs.r[15].wrapping_sub(2));
     cpu.exception(Exception::SoftwareInterrupt);
 }
 
