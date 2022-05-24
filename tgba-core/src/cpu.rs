@@ -1,5 +1,5 @@
 use bitvec::prelude::*;
-use log::{info, trace};
+use log::{debug, info, trace, warn};
 use std::mem::size_of;
 
 use crate::{
@@ -284,7 +284,7 @@ impl<C: Context> Cpu<C> {
         //     trace!("HB: {}", ctx.now());
         // }
 
-        // if ctx.now() > 77724416 - 100 {
+        // if ctx.now() > 1601629 - 10000 {
         //     self.trace = true;
         // }
 
@@ -297,7 +297,7 @@ impl<C: Context> Cpu<C> {
         }
 
         if !self.regs.irq_disable && ctx.interrupt().irq() {
-            info!("IRQ occured: cycle {}", ctx.now());
+            debug!("IRQ occured: cycle {}", ctx.now());
 
             ctx.interrupt_mut().set_halt(false);
             self.exception(Exception::IRQ);
@@ -319,7 +319,7 @@ impl<C: Context> Cpu<C> {
     }
 
     fn exception(&mut self, e: Exception) {
-        info!("Exception: {e:?}");
+        debug!("Exception: {e:?}");
 
         let old_cpsr = self.regs.cpsr();
 
@@ -1623,31 +1623,31 @@ trait Data {
 impl Data for u32 {
     fn load(ctx: &mut impl Context, addr: u32, first: bool) -> u32 {
         let ofs = addr & 3;
-        let data = ctx.read32(addr & !3, first);
+        let data = ctx.read32(addr, first);
         data.rotate_right(ofs * 8)
     }
 
     fn store(ctx: &mut impl Context, addr: u32, data: u32, first: bool) {
-        ctx.write32(addr & !3, data, first)
+        ctx.write32(addr, data, first)
     }
 }
 
 impl Data for u16 {
     fn load(ctx: &mut impl Context, addr: u32, first: bool) -> u32 {
         let ofs = addr & 1;
-        let data = ctx.read16(addr & !1, first) as u32;
+        let data = ctx.read16(addr, first) as u32;
         data.rotate_right(ofs * 8)
     }
 
     fn store(ctx: &mut impl Context, addr: u32, data: u32, first: bool) {
-        ctx.write16(addr & !1, data as u16, first)
+        ctx.write16(addr, data as u16, first)
     }
 }
 
 impl Data for i16 {
     fn load(ctx: &mut impl Context, addr: u32, first: bool) -> u32 {
         let ofs = addr & 1;
-        let data = ctx.read16(addr & !1, first) as i16;
+        let data = ctx.read16(addr, first) as i16;
         (data >> (ofs * 8)) as u32
     }
 }
@@ -1999,8 +1999,7 @@ fn arm_op_ldstm<
         }
 
         if L {
-            let data = u32::load(ctx, addr, first);
-            // trace!("LDM[{i:02}]: 0x{addr:08X} = 0x{data:08X}");
+            let data = ctx.read32(addr, first);
             if i != 15 {
                 cpu.regs.r[i] = data;
             } else {
@@ -2010,8 +2009,7 @@ fn arm_op_ldstm<
             // Whenever R15 is stored to memory the stored value is the address of the STM
             // instruction plus 12.
             let data = cpu.regs.r[i].wrapping_add(if i == 15 { 4 } else { 0 });
-            // trace!("STM[{i:02}]: 0x{addr:08X} = 0x{data:08X}");
-            u32::store(ctx, addr, data, first);
+            ctx.write32(addr, data, first);
         }
         first = false;
 
@@ -2221,11 +2219,11 @@ fn arm_disasm_cdp(instr: u32, _pc: u32) -> String {
 }
 
 fn arm_op_mrc<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
-    todo!()
+    todo!("MRC")
 }
 
 fn arm_op_mcr<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
-    todo!()
+    todo!("MCR")
 }
 
 fn arm_disasm_mrc_mcr(instr: u32, _pc: u32) -> String {
@@ -2249,7 +2247,7 @@ fn arm_disasm_mrc_mcr(instr: u32, _pc: u32) -> String {
 }
 
 fn arm_op_undef<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
-    trace!("Undefined instruction: {:08X}", instr);
+    warn!("Undefined instruction: {:08X}", instr);
     panic!()
 }
 
@@ -2258,7 +2256,7 @@ fn arm_disasm_undef(_instr: u32, _pc: u32) -> String {
 }
 
 fn arm_op_invalid<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
-    trace!("Invalid instruction: {:08X}", instr);
+    warn!("Invalid instruction: {:08X}", instr);
     panic!()
 }
 
@@ -2266,8 +2264,11 @@ fn arm_disasm_invalid(_instr: u32, _pc: u32) -> String {
     "invalid".to_string()
 }
 
-fn thumb_op_invalid<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
-    trace!("Invalid instruction: {:04X}", instr);
+fn thumb_op_invalid<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+    warn!(
+        "Invalid instruction: PC: {:08X}, instr: {instr:04X}",
+        cpu.regs.r[15].wrapping_sub(2)
+    );
     panic!()
 }
 

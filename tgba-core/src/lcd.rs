@@ -1,14 +1,14 @@
 use std::cmp::min;
 
 use bitvec::prelude::*;
-use log::{info, trace};
+use log::{debug, info, trace};
 
 use crate::{
     consts::{CLOCK_PER_DOT, DOTS_PER_LINE, LINES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH},
     context::{Interrupt, Timing},
     interface::{FrameBuf, Pixel},
     interrupt::InterruptKind,
-    util::{pack, trait_alias},
+    util::{pack, read16, trait_alias},
 };
 
 trait_alias!(pub trait Context = Timing + Interrupt);
@@ -62,9 +62,47 @@ struct LineBuf {
     obj: Vec<u16>,
     obj_attr: Vec<ObjAttr>,
     surface: [Vec<u16>; 2],
-    surface_priority: [Vec<u8>; 2],
-    surface_attr: [Vec<u8>; 2],
+    surface_attr: [Vec<SurfaceAttr>; 2],
     finished: Vec<u16>,
+}
+
+#[derive(Default, Clone)]
+struct SurfaceAttr(u16);
+
+impl SurfaceAttr {
+    fn new(priority: u8, kind: u8, effect: u8) -> Self {
+        let mut ret = SurfaceAttr(0);
+        ret.set_priority(priority);
+        ret.set_kind(kind);
+        ret.set_effect(effect);
+        ret
+    }
+
+    // priority is 0-4
+    fn priority(&self) -> u8 {
+        (self.0 & 7) as u8
+    }
+
+    fn set_priority(&mut self, priority: u8) {
+        self.0 = self.0 & !7 | priority as u16
+    }
+
+    // kind: 0-3: BG0-3, 4: OBJ, 5: Backdrop
+    fn kind(&self) -> u8 {
+        ((self.0 >> 3) & 7) as u8
+    }
+
+    fn set_kind(&mut self, kind: u8) {
+        self.0 = self.0 & !(7 << 3) | ((kind as u16) << 3);
+    }
+
+    fn effect(&self) -> u8 {
+        (self.0 >> 6) as u8
+    }
+
+    fn set_effect(&mut self, effect: u8) {
+        self.0 = self.0 & !(3 << 6) | ((effect as u16) << 6);
+    }
 }
 
 impl Default for LineBuf {
@@ -74,22 +112,24 @@ impl Default for LineBuf {
             obj: vec![0; SCREEN_WIDTH as _],
             obj_attr: vec![Default::default(); SCREEN_WIDTH as _],
             surface: <[Vec<u16>; 2]>::default().map(|_| vec![0x8000; SCREEN_WIDTH as _]),
-            surface_priority: <[Vec<u8>; 2]>::default().map(|_| vec![0; SCREEN_WIDTH as _]),
-            surface_attr: <[Vec<u8>; 2]>::default().map(|_| vec![0; SCREEN_WIDTH as _]),
+            surface_attr: <[Vec<u8>; 2]>::default()
+                .map(|_| vec![Default::default(); SCREEN_WIDTH as _]),
             finished: vec![0; SCREEN_WIDTH as _],
         }
     }
 }
 
 impl LineBuf {
-    fn clear(&mut self) {
+    fn clear(&mut self, backdrop: u16) {
         self.obj_attr.fill(ObjAttr::default());
         self.obj.fill(0x8000);
         for i in 0..4 {
             self.bg[i].fill(0x8000);
         }
-        self.surface_priority[0].fill(4);
-        self.surface_priority[1].fill(4);
+        for i in 0..2 {
+            self.surface[0].fill(backdrop);
+            self.surface_attr[i].fill(SurfaceAttr::new(4, 5, 0));
+        }
     }
 }
 
@@ -209,8 +249,7 @@ impl Lcd {
         self.x += 1;
 
         if self.y < SCREEN_HEIGHT && self.x == SCREEN_WIDTH {
-            // TODO: HBLANK
-            info!("Enter HBLANK: frame:{}, y:{:03}", self.frame, self.y);
+            debug!("Enter HBLANK: frame:{}, y:{:03}", self.frame, self.y);
 
             self.render_line();
 
@@ -227,7 +266,7 @@ impl Lcd {
 
             if self.y == SCREEN_HEIGHT {
                 // TODO: VBLANK
-                info!("Enter VBLANK: frame:{}", self.frame);
+                debug!("Enter VBLANK: frame:{}", self.frame);
 
                 if self.vblank_irq_enable {
                     ctx.interrupt_mut().set_interrupt(InterruptKind::VBlank);
@@ -399,8 +438,6 @@ impl Lcd {
                 self.display_window[0] = v[13];
                 self.display_window[1] = v[14];
                 self.display_obj_window = v[15];
-
-                eprintln!("Set BG mode: {} at line: {}", self.bg_mode, self.y);
             }
             0x002 => {}
 
@@ -566,7 +603,7 @@ impl Lcd {
             return;
         }
 
-        self.line_buf.clear();
+        self.line_buf.clear(self.bg_palette256(0));
 
         trace!("Render line: y = {}, mode = {}", self.y, self.bg_mode);
 
@@ -756,7 +793,7 @@ impl Lcd {
         for x in 0..SCREEN_WIDTH {
             if let Some((rx, ry)) = self.calc_refpoint_for_x(i, 240, 160, false, x, cx, cy) {
                 let addr = (ry * 240 + rx) as usize * 2;
-                let col = u16::from_le_bytes(self.vram[addr..addr + 2].try_into().unwrap());
+                let col = read16(&self.vram, addr);
                 self.line_buf.bg[i][x as usize] = col & 0x7FFF;
             }
         }
@@ -795,7 +832,7 @@ impl Lcd {
         for x in 0..SCREEN_WIDTH {
             if let Some((rx, ry)) = self.calc_refpoint_for_x(i, 160, 128, false, x, cx, cy) {
                 let addr = (base_addr + (ry * 160 + rx) * 2) as usize;
-                let col = u16::from_le_bytes(self.vram[addr..addr + 2].try_into().unwrap());
+                let col = read16(&self.vram, addr);
                 self.line_buf.bg[i][x as usize] = col & 0x7FFF;
             }
         }
@@ -1202,10 +1239,10 @@ impl Lcd {
         let any = WindowCtrl {
             display_bg: [true, true, true, true],
             display_obj: true,
-            color_special_effect: false,
+            color_special_effect: true,
         };
 
-        // FIXME: how to use color special effect flag on window?
+        let global_effect = self.blend_ctrl.effect;
 
         for x in 0..SCREEN_WIDTH {
             let in_win0 = y_in_win0 && self.window[0].l as u32 <= x && x <= self.window[0].r as u32;
@@ -1229,11 +1266,18 @@ impl Lcd {
             if self.display_obj && win_ctrl.display_obj {
                 let col = self.line_buf.obj[x];
                 if col & 0x8000 == 0 {
-                    // eprintln!(
-                    //     "x: {x} = {col:04X}, prio: {}",
-                    //     self.line_buf.obj_attr[x].priority()
-                    // );
-                    self.put_surface_pixel(x, col, self.line_buf.obj_attr[x].priority(), 4);
+                    let effect = if !win_ctrl.color_special_effect {
+                        0
+                    } else if self.line_buf.obj_attr[x].semi_transparent() {
+                        4
+                    } else {
+                        global_effect
+                    };
+                    self.put_surface_pixel(
+                        x,
+                        col,
+                        SurfaceAttr::new(self.line_buf.obj_attr[x].priority(), 4, effect),
+                    );
                 }
             }
 
@@ -1244,82 +1288,59 @@ impl Lcd {
 
                 let col = self.line_buf.bg[i][x];
                 if col & 0x8000 == 0 {
-                    self.put_surface_pixel(x, col, self.bg[i].priority, i as u8);
+                    let effect = if !win_ctrl.color_special_effect {
+                        0
+                    } else {
+                        global_effect
+                    };
+                    self.put_surface_pixel(
+                        x,
+                        col,
+                        SurfaceAttr::new(self.bg[i].priority, i as u8, effect),
+                    );
                 }
             }
         }
     }
 
-    fn put_surface_pixel(&mut self, x: usize, col: u16, priority: u8, attr: u8) {
-        if self.line_buf.surface_priority[0][x] > priority {
+    fn put_surface_pixel(&mut self, x: usize, col: u16, attr: SurfaceAttr) {
+        if self.line_buf.surface_attr[0][x].priority() > attr.priority() {
             self.line_buf.surface[1][x] = self.line_buf.surface[0][x];
-            self.line_buf.surface_priority[1][x] = self.line_buf.surface_priority[0][x];
-            self.line_buf.surface_attr[1][x] = self.line_buf.surface_attr[0][x];
+            self.line_buf.surface_attr[1][x] = self.line_buf.surface_attr[0][x].clone();
 
             self.line_buf.surface[0][x] = col;
-            self.line_buf.surface_priority[0][x] = priority;
-            self.line_buf.surface_attr[0][x] = attr
-        } else if self.line_buf.surface_priority[1][x] > priority {
+            self.line_buf.surface_attr[0][x] = attr;
+        } else if self.line_buf.surface_attr[1][x].priority() > attr.priority() {
             self.line_buf.surface[1][x] = col;
-            self.line_buf.surface_priority[1][x] = priority;
             self.line_buf.surface_attr[1][x] = attr
         }
     }
 
     fn color_special_effect(&mut self) {
-        let back_drop = self.bg_palette256(0);
-
         // eprintln!("Color special effect: backdrop: 0x{:04X}", back_drop);
+
+        let target0 = self.blend_ctrl.target[0];
+        let target1 = self.blend_ctrl.target[1];
+        let eva = self.blend_ctrl.eva;
+        let evb = self.blend_ctrl.evb;
+        let evy = self.blend_ctrl.evy;
 
         for x in 0..SCREEN_WIDTH {
             let x = x as usize;
-            let (ty, col) = if self.line_buf.surface_priority[0][x] == 4 {
-                (0, back_drop)
-            } else if self.line_buf.surface[1][x] == 4 {
-                (1, self.line_buf.surface[0][x])
-            } else {
-                let c0 = self.line_buf.surface[0][x];
-                let c1 = self.line_buf.surface[1][x];
-                let a0 = self.line_buf.surface_attr[0][x];
-                let a1 = self.line_buf.surface_attr[1][x];
 
-                // TODO: overwrite effect by obj attr
-                // TODO: disable effect by window
+            let c0 = self.line_buf.surface[0][x];
+            let c1 = self.line_buf.surface[1][x];
+            let a0 = &self.line_buf.surface_attr[0][x];
+            let a1 = &self.line_buf.surface_attr[1][x];
 
-                match self.blend_ctrl.effect {
-                    // None
-                    0 => (2, c0),
-                    // Alpha belnding
-                    1 => {
-                        if self.blend_ctrl.target[0] & (1 << a0) != 0
-                            && self.blend_ctrl.target[1] & (1 << a1) != 0
-                        {
-                            (
-                                3,
-                                alpha_blend(c0, self.blend_ctrl.eva, c1, self.blend_ctrl.evb),
-                            )
-                        } else {
-                            (4, c0)
-                        }
-                    }
-                    // Brightness increase
-                    2 => {
-                        if self.blend_ctrl.target[0] & (1 << a0) != 0 {
-                            (5, brightness_increase(c0, self.blend_ctrl.evy))
-                        } else {
-                            (6, c0)
-                        }
-                    }
-                    // Brightness decrease
-                    3 => {
-                        if self.blend_ctrl.target[0] & (1 << a0) != 0 {
-                            (7, brightness_decrease(c0, self.blend_ctrl.evy))
-                        } else {
-                            (8, c0)
-                        }
-                    }
-                    _ => unreachable!(),
+            let col = match a0.effect() {
+                1 if target0 & (1 << a0.kind()) != 0 && target1 & (1 << a1.kind()) != 0 => {
+                    alpha_blend(c0, eva, c1, evb)
                 }
+                2 if target0 & (1 << a0.kind()) != 0 => brightness_increase(c0, evy),
+                3 if target0 & (1 << a0.kind()) != 0 => brightness_decrease(c0, evy),
+                4 if a0.kind() == 4 => alpha_blend(c0, eva, c1, evb),
+                _ => c0,
             };
 
             self.line_buf.finished[x] = col;
@@ -1327,7 +1348,7 @@ impl Lcd {
     }
 
     fn bg_palette256(&self, i: usize) -> u16 {
-        u16::from_le_bytes(self.palette[i * 2..i * 2 + 2].try_into().unwrap()) & 0x7FFF
+        read16(&self.palette, i * 2) & 0x7FFF
     }
 
     fn bg_palette16(&self, i: usize, j: usize) -> u16 {

@@ -1,4 +1,4 @@
-use log::info;
+use log::debug;
 
 #[derive(Default)]
 pub struct Interrupt {
@@ -6,7 +6,7 @@ pub struct Interrupt {
     enable: u16,
     request: u16,
     halt: bool,
-    stop: bool,
+    // stop: bool,
 }
 
 #[derive(Debug)]
@@ -65,7 +65,7 @@ impl Interrupt {
     }
 
     pub fn set_interrupt(&mut self, source: InterruptKind) {
-        info!("Set interrupt: {source:?}");
+        debug!("Set interrupt: {source:?}");
         self.request |= 1 << source as u16;
     }
 
@@ -77,11 +77,11 @@ impl Interrupt {
         self.halt = halt;
     }
 
-    pub fn stop(&self) -> bool {
-        self.stop
-    }
+    // pub fn stop(&self) -> bool {
+    //     self.stop
+    // }
 
-    pub fn set_stop(&mut self, stop: bool) {
-        self.stop = stop;
-    }
+    // pub fn set_stop(&mut self, stop: bool) {
+    //     self.stop = stop;
+    // }
 }

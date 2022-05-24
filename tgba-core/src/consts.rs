@@ -1,4 +1,4 @@
-pub const SYSTEM_CLOCK: u64 = 16777216;
+// pub const SYSTEM_CLOCK: u64 = 16777216;
 pub const CLOCK_PER_DOT: u64 = 4;
 
 pub const DOTS_PER_LINE: u32 = 308;

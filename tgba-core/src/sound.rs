@@ -1,6 +1,7 @@
 use std::{cmp::min, collections::VecDeque};
 
 use bitvec::prelude::*;
+use log::debug;
 
 use crate::{
     consts::AUDIO_SAMPLES_PER_SECOND,
@@ -112,11 +113,11 @@ impl Sound {
         self.freq_counter %= 16;
 
         for _ in 0..ticks {
-            self.tick_1M(ctx);
+            self.tick_1m(ctx);
         }
     }
 
-    fn tick_1M(&mut self, ctx: &mut impl Context) {
+    fn tick_1m(&mut self, ctx: &mut impl Context) {
         if self.power_on {
             self.frame_counter += 1;
 
@@ -779,22 +780,9 @@ impl Noise {
             self.length = 64;
         }
         self.current_volume = self.initial_volume;
-        self.lsfr = 0x7fff;
+        self.lsfr = 0x7FFF;
         self.divisor_timer = DIVISOR[self.divisor_code as usize] / 8;
         self.shift_clock_timer = 1 << (self.clock_shift + 1);
-
-        // log::debug!(
-        //     "NOISE ch trigger: {}Hz, divisor={}, shfit={}",
-        //     524288.0
-        //         / (if self.divisor_code == 0 {
-        //             0.5
-        //         } else {
-        //             self.divisor_code as f64
-        //         })
-        //         / 2.0_f64.powi(self.clock_shift as i32 + 1),
-        //     self.divisor_code,
-        //     self.clock_shift,
-        // );
     }
 
     fn tick(&mut self, length_tick: bool, envelope_tick: bool) {
@@ -914,6 +902,10 @@ impl DirectSound {
 
         self.current_output = self.fifo.pop_front();
 
+        if self.current_output.is_none() {
+            debug!("Sound buffer empty");
+        }
+
         if self.fifo.len() <= 16 {
             // eprintln!(
             //     "Sound DMA Requested {}: current: {:?}",
@@ -976,20 +968,6 @@ impl Sound {
             //     1 => self.channel_ctrl[0].output_ch[1],
             //     0 => self.channel_ctrl[0].output_ch[0],
             // },
-            // // NR52: Sound on/off (R/W)
-            // 0xFF26 => pack! {
-            //     7 => self.power_on,
-            //     4..=6 => !0,
-            //     3 => self.noise.on,
-            //     2 => self.wave.on,
-            //     1 => self.pulse[1].on,
-            //     0 => self.pulse[0].on,
-            // },
-
-            // 0xFF27..=0xFF2F => !0,
-
-            // // Wave Pattern RAM
-            // 0xFF30..=0xFF3F => self.wave.ram[(addr & 0xf) as usize],
 
             // // PCM12
             // 0xFF76 => pack! {
@@ -1030,6 +1008,17 @@ impl Sound {
                 }
                 data
             }
+
+            // NR52: Sound on/off (R/W)
+            0x084 => pack! {
+                7 => self.power_on,
+                4..=6 => 0,
+                3 => self.noise.on,
+                2 => self.wave.on,
+                1 => self.pulse[1].on,
+                0 => self.pulse[0].on,
+            },
+            0x085 => 0,
 
             // SOUNDBIAS
             0x088 => 0x00,
@@ -1134,7 +1123,12 @@ impl Sound {
             0x090..=0x09F => self.wave.write_ram(addr & 0xF, data),
 
             // Sound FIFO
-            0x0A0..=0x0A3 => self.direct_sound[0].push_fifo(data),
+            0x0A0..=0x0A3 => {
+                // use std::io::Write;
+                // std::io::stdout().write(&[data]).unwrap();
+
+                self.direct_sound[0].push_fifo(data);
+            }
             0x0A4..=0x0A7 => self.direct_sound[1].push_fifo(data),
 
             0x0A8..=0x0AF => {}

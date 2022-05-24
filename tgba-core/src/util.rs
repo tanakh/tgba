@@ -30,3 +30,32 @@ macro_rules! pack {
 }
 
 pub(crate) use pack;
+
+pub fn read16(p: &[u8], addr: usize) -> u16 {
+    u16::from_le_bytes(p[addr..addr + 2].try_into().unwrap())
+}
+
+pub fn read32(p: &[u8], addr: usize) -> u32 {
+    u32::from_le_bytes(p[addr..addr + 4].try_into().unwrap())
+}
+
+pub fn write16(p: &mut [u8], addr: usize, data: u16) {
+    p[addr..addr + 2].copy_from_slice(&data.to_le_bytes());
+}
+
+pub fn write32(p: &mut [u8], addr: usize, data: u32) {
+    p[addr..addr + 4].copy_from_slice(&data.to_le_bytes());
+}
+
+pub struct ConstEval<const V: u8>;
+
+impl<const V: u8> ConstEval<V> {
+    pub const VALUE: u8 = V;
+}
+
+macro_rules! enum_pat {
+    ($e:expr) => {
+        ConstEval::<{ $e as u8 }>::VALUE
+    };
+}
+pub(crate) use enum_pat;

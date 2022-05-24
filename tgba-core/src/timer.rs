@@ -19,18 +19,18 @@ impl Timers {
         match addr {
             // TMxCNT_L
             0x100 | 0x104 | 0x108 | 0x10C => {
-                let i = ((addr - 0x100) / 0x4) as usize;
+                let i = ((addr - 0x100) / 4) as usize;
                 self.timer[i].counter
             }
             // TMxCNT_H
             0x102 | 0x106 | 0x10A | 0x10E => {
-                let i = ((addr - 0x100) / 0x4) as usize;
+                let i = ((addr - 0x100) / 4) as usize;
                 let timer = &self.timer[i];
                 pack! {
-                    0..=1   => timer.prescaler,
-                    2 => timer.countup_timing,
-                    6 => timer.irq_enable,
-                    7 => timer.enable,
+                    0..=1 => timer.prescaler,
+                    2     => timer.countup_timing,
+                    6     => timer.irq_enable,
+                    7     => timer.enable,
                 }
             }
             _ => unreachable!(),
@@ -41,14 +41,14 @@ impl Timers {
         match addr {
             // TMxCNT_L
             0x100 | 0x104 | 0x108 | 0x10C => {
-                let i = ((addr - 0x100) / 0x4) as usize;
+                let i = ((addr - 0x100) / 4) as usize;
                 self.timer[i].reload = data;
             }
             // TMxCNT_H
             0x102 | 0x106 | 0x10A | 0x10E => {
-                let data = data.view_bits::<Lsb0>();
-                let i = ((addr - 0x100) / 0x4) as usize;
+                let i = ((addr - 0x100) / 4) as usize;
                 let timer = &mut self.timer[i];
+                let data = data.view_bits::<Lsb0>();
                 timer.prescaler = data[0..=1].load();
                 timer.countup_timing = data[2];
                 timer.irq_enable = data[6];

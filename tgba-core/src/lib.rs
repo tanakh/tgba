@@ -1,13 +1,17 @@
 // #![feature(trace_macros)]
 
+mod backup;
 mod bus;
 mod consts;
 mod context;
 mod cpu;
+mod dma;
 mod interface;
 mod interrupt;
+mod ioreg_info;
 mod lcd;
 mod rom;
+mod serial;
 mod sound;
 mod timer;
 mod util;
@@ -56,6 +60,7 @@ impl Agb {
     }
 
     pub fn set_key_input(&mut self, key_input: &KeyInput) {
-        self.ctx.bus_mut().set_key_input(key_input);
+        use context::Bus;
+        self.ctx.set_key_input(key_input);
     }
 }

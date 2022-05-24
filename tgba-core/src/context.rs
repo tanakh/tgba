@@ -1,4 +1,4 @@
-use crate::{bus, cpu, interrupt, lcd, rom, sound};
+use crate::{bus, cpu, interrupt, lcd, rom, sound, KeyInput};
 use ambassador::{delegatable_trait, Delegate};
 
 #[delegatable_trait]
@@ -15,6 +15,8 @@ pub trait Bus {
     fn write32(&mut self, addr: u32, data: u32, first: bool);
 
     fn bus_tick(&mut self);
+
+    fn set_key_input(&mut self, key_input: &KeyInput);
 }
 
 #[delegatable_trait]
@@ -138,6 +140,10 @@ impl Bus for Inner {
 
     fn bus_tick(&mut self) {
         self.bus.tick(&mut self.inner);
+    }
+
+    fn set_key_input(&mut self, key_input: &KeyInput) {
+        self.bus.set_key_input(&mut self.inner, key_input);
     }
 }
 
