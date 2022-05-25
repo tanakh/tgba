@@ -58,11 +58,20 @@ impl Flash {
                 // 1362h  Sanyo      128K  ?        ?,?,?           ?    ?    ?    ?
                 // 09C2h  Macronix   128K  ?        ?,?,?           ?    ?    ?    ?
 
-                // Emulate SST for 64KB Flash
-                match addr {
-                    0x0000 => 0xBF,
-                    0x0001 => 0xD4,
-                    _ => 0,
+                if self.data.len() == 64 * 1024 {
+                    // Emulate SST for 64KB Flash
+                    match addr {
+                        0x0000 => 0xBF,
+                        0x0001 => 0xD4,
+                        _ => 0,
+                    }
+                } else {
+                    // Emulate Sanyo for 128KB Flash
+                    match addr {
+                        0x0000 => 0x62,
+                        0x0001 => 0x13,
+                        _ => 0,
+                    }
                 }
             }
             ReadMode::Data => self.data[self.bank as usize * 0x10000 + (addr as usize & 0xFFFF)],
