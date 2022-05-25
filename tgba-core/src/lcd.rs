@@ -1188,7 +1188,9 @@ impl Lcd {
         match mode {
             // normal
             0 => {
-                if self.line_buf.obj[x] & 0x8000 != 0 {
+                if self.line_buf.obj[x] & 0x8000 != 0
+                    || priority < self.line_buf.obj_attr[x].priority()
+                {
                     self.line_buf.obj[x] = col;
                     self.line_buf.obj_attr[x].set_priority(priority);
                     self.line_buf.obj_attr[x].set_semi_transparent(false);
@@ -1196,7 +1198,9 @@ impl Lcd {
             }
             // semi-trans
             1 => {
-                if self.line_buf.obj[x] & 0x8000 != 0 {
+                if self.line_buf.obj[x] & 0x8000 != 0
+                    || priority < self.line_buf.obj_attr[x].priority()
+                {
                     self.line_buf.obj[x] = col;
                     self.line_buf.obj_attr[x].set_priority(priority);
                     self.line_buf.obj_attr[x].set_semi_transparent(true);
@@ -1279,7 +1283,7 @@ impl Lcd {
                     let effect = if !win_ctrl.color_special_effect {
                         0
                     } else if self.line_buf.obj_attr[x].semi_transparent() {
-                        4
+                        1
                     } else {
                         global_effect
                     };
@@ -1349,7 +1353,7 @@ impl Lcd {
                 }
                 2 if target0 & (1 << a0.kind()) != 0 => brightness_increase(c0, evy),
                 3 if target0 & (1 << a0.kind()) != 0 => brightness_decrease(c0, evy),
-                4 if a0.kind() == 4 => alpha_blend(c0, eva, c1, evb),
+                // 4 if a0.kind() == 4 => alpha_blend(c0, eva, c1, evb),
                 _ => c0,
             };
 
