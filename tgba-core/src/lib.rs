@@ -23,8 +23,6 @@ use interface::AudioBuf;
 pub use interface::{FrameBuf, KeyInput};
 pub use rom::Rom;
 
-use crate::context::Bus;
-
 pub struct Agb {
     ctx: Context,
 }
@@ -37,7 +35,7 @@ impl Agb {
     }
 
     pub fn run_frame(&mut self) {
-        use context::{Lcd, Sound};
+        use context::{Bus, Lcd, Sound};
 
         self.ctx.sound_mut().clear_buf();
 

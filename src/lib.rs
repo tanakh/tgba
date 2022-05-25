@@ -222,6 +222,13 @@ fn load_rom(file: &Path) -> Result<Rom> {
 }
 
 fn dump_rom_info(rom: &Rom) {
+    let rom_size = rom.data.len();
+    let rom_size = if rom_size < 1 * 1024 * 1024 {
+        format!("{} KiB", rom_size as f64 / 1024 as f64)
+    } else {
+        format!("{} MiB", rom_size as f64 / (1024 * 1024) as f64)
+    };
+
     let mut table = prettytable::table! {
         ["Title", String::from_utf8_lossy(&rom.title)],
         ["Game Code", String::from_utf8_lossy(&rom.game_code)],
@@ -229,7 +236,8 @@ fn dump_rom_info(rom: &Rom) {
         ["Main Unit Code", rom.main_unit_code],
         ["Device Type", rom.device_type],
         ["ROM Version", rom.rom_version],
-        ["Backup Type", rom.backup_type()]
+        ["Backup Type", rom.backup_type()],
+        ["ROM Size", rom_size]
     };
     table.set_format(*prettytable::format::consts::FORMAT_NO_LINESEP_WITH_TITLE);
     table.printstd();

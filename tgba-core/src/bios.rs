@@ -41,7 +41,7 @@ const BIOS_FUNCTIONS: &[BiosFunctionInfo] = bios_functions! {
     0x00 SoftReset()
     0x01 RegisterRamReset(reset_flags: u8)
     0x02 Halt()
-    0x03 StopSleep()
+    0x03 Stop()
     0x04 IntrWait(force_wait_next: bool, irq_to_wait: u32)
     0x05 VBlankIntrWait()
     0x06 Div(num: i32, denom: i32)
