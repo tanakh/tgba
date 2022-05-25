@@ -127,7 +127,7 @@ impl LineBuf {
             self.bg[i].fill(0x8000);
         }
         for i in 0..2 {
-            self.surface[0].fill(backdrop);
+            self.surface[i].fill(backdrop);
             self.surface_attr[i].fill(SurfaceAttr::new(4, 5, 0));
         }
     }
@@ -153,6 +153,15 @@ struct Bg {
 
     x: u32,
     y: u32,
+    cx: u32,
+    cy: u32,
+}
+
+impl Bg {
+    fn frame_start(&mut self) {
+        self.cx = self.x;
+        self.cy = self.y;
+    }
 }
 
 #[derive(Default)]
@@ -282,6 +291,12 @@ impl Lcd {
             if self.y >= LINES_PER_FRAME {
                 self.y -= LINES_PER_FRAME;
                 self.frame += 1;
+
+                if self.y == 0 {
+                    for i in 0..4 {
+                        self.bg[i].frame_start();
+                    }
+                }
             }
         }
     }
@@ -506,19 +521,23 @@ impl Lcd {
             0x028 | 0x038 => {
                 let i = (2 + (addr - 0x028) / 0x10) as usize;
                 self.bg[i].x.view_bits_mut::<Lsb0>()[0..=15].store(data);
+                self.bg[i].cx = self.bg[i].x;
             }
             0x02A | 0x03A => {
                 let i = (2 + (addr - 0x028) / 0x10) as usize;
                 self.bg[i].x.view_bits_mut::<Lsb0>()[16..=27].store(data);
+                self.bg[i].cx = self.bg[i].x;
             }
             // BGxY
             0x02C | 0x03C => {
                 let i = (2 + (addr - 0x028) / 0x10) as usize;
                 self.bg[i].y.view_bits_mut::<Lsb0>()[0..=15].store(data);
+                self.bg[i].cy = self.bg[i].y;
             }
             0x02E | 0x03E => {
                 let i = (2 + (addr - 0x028) / 0x10) as usize;
                 self.bg[i].y.view_bits_mut::<Lsb0>()[16..=27].store(data);
+                self.bg[i].cy = self.bg[i].y;
             }
 
             // WINxH
@@ -608,15 +627,6 @@ impl Lcd {
         trace!("Render line: y = {}, mode = {}", self.y, self.bg_mode);
 
         self.render_obj();
-
-        // eprint!("OBj: ");
-        // for x in 0..VISIBLE_WIDTH as usize {
-        //     eprint!(
-        //         "{:04X}:{:02X} ",
-        //         self.line_buf.obj[x], self.line_buf.obj_attr[x].0
-        //     );
-        // }
-        // eprintln!();
 
         match self.bg_mode {
             0 => {
@@ -842,11 +852,11 @@ impl Lcd {
         let dmx = self.bg[i].dmx as i16 as i32;
         let dmy = self.bg[i].dmy as i16 as i32;
 
-        let cx = sign_extend(self.bg[i].x, 27);
-        let cy = sign_extend(self.bg[i].y, 27);
+        let cx = sign_extend(self.bg[i].cx, 27);
+        let cy = sign_extend(self.bg[i].cy, 27);
 
-        self.bg[i].x = (cx + dmx) as u32 & 0x0FFFFFFF;
-        self.bg[i].y = (cy + dmy) as u32 & 0x0FFFFFFF;
+        self.bg[i].cx = (cx + dmx) as u32 & 0x0FFFFFFF;
+        self.bg[i].cy = (cy + dmy) as u32 & 0x0FFFFFFF;
 
         if self.bg[i].mosaic {
             let mh = self.bg_mosaic_v as u32 + 1;
