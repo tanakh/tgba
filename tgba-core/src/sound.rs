@@ -1,7 +1,7 @@
 use std::{cmp::min, collections::VecDeque};
 
 use bitvec::prelude::*;
-use log::debug;
+use log::{debug, warn};
 
 use crate::{
     consts::AUDIO_SAMPLES_PER_SECOND,
@@ -200,8 +200,12 @@ impl Sound {
             }
         }
 
-        assert_ne!(self.output_ratio_gb, 3, "Invalid Output Ratio for GB sound");
-        let cgb_amp = 1 << self.output_ratio_gb;
+        let cgb_amp = if self.output_ratio_gb != 3 {
+            1 << self.output_ratio_gb
+        } else {
+            // warn!("Invalid Output Ratio for GB sound");
+            0
+        };
 
         let output = [0, 1].map(|i| {
             let agb_amp = self.output_ratio_direct_sound[i] as i32 + 1;
@@ -286,14 +290,13 @@ impl Pulse {
         match regno {
             // NR10: Channel 1 Sweep register (R/W)
             0 => pack! {
-                7     => true,
                 4..=6 => self.sweep_period,
                 3     => self.sweep_negate,
                 0..=2 => self.sweep_shift,
             },
             // NR11/NR21: Channel 1/2 Sound length/Wave pattern duty (R/W)
             // Only bits 7-6 can be read.
-            1 => pack!(6..=7 => self.duty, 0..=5 => !0),
+            1 => pack!(6..=7 => self.duty),
             // NR12/NR22: Channel 1/2 Envelope (R/W)
             2 => pack! {
                 4..=7 => self.initial_volume,
@@ -301,14 +304,10 @@ impl Pulse {
                 0..=2 => self.envelope_period,
             },
             // NR13/NR23: Channel 1/2 Frequency lo (W)
-            3 => !0,
+            3 => 0,
             // NR14/NR24: Channel 1/2 Frequency hi (R/W)
             // Only bit 6 can be read
-            4 => pack! {
-                7 => true,
-                6 => self.length_enable,
-                0..=5 => !0,
-            },
+            4 => pack!(6 => self.length_enable),
             _ => unreachable!(),
         }
     }
@@ -555,16 +554,23 @@ impl Wave {
     fn read(&mut self, regno: usize) -> u8 {
         match regno {
             // NR30: Channel 3 Sound on/off (R/W)
-            0 => pack!(7 => self.enable, 0..=6 => !0),
+            0 => pack! {
+                5 => self.steps,
+                6 => self.ram_bank,
+                7 => self.enable,
+            },
             // NR31: Channel 3 Sound length (R/W)
-            1 => !0, // ???
+            1 => 0,
             // NR32: Channel 3 Select output level (R/W)
-            2 => pack!(5..=6 => self.output_level, 7 => true, 0..=4 => !0),
+            2 => pack! {
+                5..=6 => self.output_level,
+                7     => self.output_level_75,
+            },
             // NR33: Channel 3 Frequency lo (W)
-            3 => !0,
+            3 => 0,
             // NR34: Channel 3 Frequency hi (R/W)
             // Only bit 6 can be read
-            4 => pack!(6 => self.length_enable, 7 => true, 0..=5 => !0),
+            4 => pack!(6 => self.length_enable),
             _ => unreachable!(),
         }
     }
@@ -715,7 +721,7 @@ impl Noise {
     fn read(&mut self, regno: usize) -> u8 {
         match regno {
             // NR41: Channel 4 Sound length (R/W)
-            1 => !0,
+            1 => 0,
             // NR42: Channel 4 Volume Envelope (R/W)
             2 => pack! {
                 4..=7 => self.initial_volume,
@@ -730,7 +736,7 @@ impl Noise {
             },
             // NR44: Channel 4 Counter/consecutive; initial (R/W)
             // Only bit 6 can be read
-            4 => pack!(6 => self.length_enable, 7 => true, 0..=5 => !0),
+            4 => pack!(6 => self.length_enable),
             _ => unreachable!(),
         }
     }
@@ -950,35 +956,11 @@ impl Sound {
             0x07D => self.noise.read(4),
             0x07E..=0x07F => 0,
 
-            // // NR50: Channel control / ON-OFF / Volume (R/W)
-            // 0xFF24 => pack! {
-            //     7     => self.channel_ctrl[1].vin_enable,
-            //     4..=6 => self.channel_ctrl[1].volume,
-            //     3     => self.channel_ctrl[0].vin_enable,
-            //     0..=2 => self.channel_ctrl[0].volume,
-            // },
-            // // NR51: Selection of Sound output terminal (R/W)
-            // 0xFF25 => pack! {
-            //     7 => self.channel_ctrl[1].output_ch[3],
-            //     6 => self.channel_ctrl[1].output_ch[2],
-            //     5 => self.channel_ctrl[1].output_ch[1],
-            //     4 => self.channel_ctrl[1].output_ch[0],
-            //     3 => self.channel_ctrl[0].output_ch[3],
-            //     2 => self.channel_ctrl[0].output_ch[2],
-            //     1 => self.channel_ctrl[0].output_ch[1],
-            //     0 => self.channel_ctrl[0].output_ch[0],
-            // },
-
-            // // PCM12
-            // 0xFF76 => pack! {
-            //     4..=7 => self.pulse[1].output().unwrap_or(0),
-            //     0..=3 => self.pulse[0].output().unwrap_or(0),
-            // },
-            // // PCM34
-            // 0xFF77 => pack! {
-            //     4..=7 => self.noise.output().unwrap_or(0),
-            //     0..=3 => self.wave.output().unwrap_or(0),
-            // },
+            // NR50: Channel control / ON-OFF / Volume (R/W)
+            0x080 => pack! {
+                0..=2 => self.channel_ctrl[0].volume,
+                4..=6 => self.channel_ctrl[1].volume,
+            },
 
             // NR51: Selection of Sound output terminal (R/W)
             0x081 => pack! {
@@ -1018,16 +1000,20 @@ impl Sound {
                 1 => self.pulse[1].on,
                 0 => self.pulse[0].on,
             },
-            0x085 => 0,
+            0x085..=0x087 => 0,
 
             // SOUNDBIAS
             0x088 => 0x00,
             0x089 => 0x02,
 
+            0x08A..=0x08F => 0,
+
             // Waveform RAM
             0x090..=0x09F => self.wave.read_ram(addr & 0xF),
 
-            _ => todo!("Sound read: 0x{addr:03X}"),
+            0x0A0..=0x0AF => 0,
+
+            _ => unreachable!(),
         };
 
         data
@@ -1114,10 +1100,14 @@ impl Sound {
             0x084 => {
                 self.set_power(data.view_bits::<Lsb0>()[7]);
             }
-            0x085 => {}
+            0x085..=0x087 => {}
 
             // SOUNDBIAS
-            0x088 | 0x089 => {}
+            0x088 | 0x089 => {
+                warn!("SOUNDBIAS: 0x{addr:03X} = 0x{data:02X}");
+            }
+
+            0x08A..=0x08F => {}
 
             // Waveform RAM
             0x090..=0x09F => self.wave.write_ram(addr & 0xF, data),
