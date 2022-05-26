@@ -258,12 +258,20 @@ impl Lcd {
         self.x += 1;
 
         if self.y < SCREEN_HEIGHT && self.x == SCREEN_WIDTH {
-            debug!("Enter HBLANK: frame:{}, y:{:03}", self.frame, self.y);
+            trace!(
+                "Enter HBLANK: frame:{}, y:{:03}, cycle: {}",
+                self.frame,
+                self.y,
+                ctx.now()
+            );
 
-            self.render_line();
-
+            // Note that no H-Blank interrupts are generated within V-Blank period.
             if self.hblank_irq_enable {
                 ctx.interrupt_mut().set_interrupt(InterruptKind::HBlank);
+            }
+
+            if self.y < SCREEN_HEIGHT {
+                self.render_line();
             }
         }
 
@@ -271,11 +279,15 @@ impl Lcd {
             self.x -= DOTS_PER_LINE;
             self.y += 1;
 
-            trace!("Frame:{}, Line:{:03}", self.frame, self.y);
+            trace!(
+                "Frame:{}, Line:{:03}, cycle: {}",
+                self.frame,
+                self.y,
+                ctx.now()
+            );
 
             if self.y == SCREEN_HEIGHT {
-                // TODO: VBLANK
-                debug!("Enter VBLANK: frame:{}", self.frame);
+                debug!("Enter VBLANK: frame:{}, cycle: {}", self.frame, ctx.now());
 
                 if self.vblank_irq_enable {
                     ctx.interrupt_mut().set_interrupt(InterruptKind::VBlank);
@@ -283,9 +295,7 @@ impl Lcd {
             }
 
             if self.y == self.vcount as u32 && self.vcount_irq_enable {
-                if self.vblank_irq_enable {
-                    ctx.interrupt_mut().set_interrupt(InterruptKind::VCount);
-                }
+                ctx.interrupt_mut().set_interrupt(InterruptKind::VCount);
             }
 
             if self.y >= LINES_PER_FRAME {
@@ -302,11 +312,13 @@ impl Lcd {
     }
 
     pub fn vblank(&self) -> bool {
-        self.y >= SCREEN_HEIGHT
+        // set in line 160..226; not 227
+        SCREEN_HEIGHT <= self.y && self.y < 227
     }
 
     pub fn hblank(&self) -> bool {
-        self.y < SCREEN_HEIGHT && self.x >= SCREEN_WIDTH
+        // toggled in all lines, 0..227
+        self.x >= SCREEN_WIDTH
     }
 
     fn vcount_match(&self) -> bool {
