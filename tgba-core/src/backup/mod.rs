@@ -26,7 +26,9 @@ impl Backup {
             if match_id_string(&data[i..], b"EEPROM_Vnnn") {
                 return Backup::Eeprom(Default::default());
             }
-            if match_id_string(&data[i..], b"SRAM_Vnnn") {
+            if match_id_string(&data[i..], b"SRAM_Vnnn")
+                || match_id_string(&data[i..], b"SRAM_F_Vnnn")
+            {
                 return Backup::Sram(Sram::new());
             }
             if match_id_string(&data[i..], b"FLASH_Vnnn")
