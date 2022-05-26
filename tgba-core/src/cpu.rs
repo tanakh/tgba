@@ -266,7 +266,7 @@ impl<C: Context> Cpu<C> {
         Cpu {
             regs: Registers::default(),
             pc_changed: false,
-            fetch_first: true,
+            fetch_first: false,
             prev_regs: [0; 16],
             trace: false,
             arm_op_table,
@@ -280,10 +280,19 @@ impl<C: Context> Cpu<C> {
         &self.regs
     }
 
-    pub fn set_pc(&mut self, pc: u32) {
+    pub fn set_pc(&mut self, ctx: &mut C, pc: u32) {
         self.regs.r[15] = pc;
         self.pc_changed = true;
-        self.fetch_first = true;
+
+        // adjust cycle for prefetch
+        if !self.regs.state {
+            let _ = ctx.read32(pc, true);
+            let _ = ctx.read32(pc, false);
+        } else {
+            let _ = ctx.read16(pc, true);
+            let _ = ctx.read16(pc, false);
+        }
+        self.fetch_first = false;
     }
 
     pub fn exec_one(&mut self, ctx: &mut C) {
@@ -293,7 +302,7 @@ impl<C: Context> Cpu<C> {
         //     trace!("HB: {}", ctx.now());
         // }
 
-        // if ctx.now() > 79130486 - 1000 {
+        // if ctx.now() >= 187286755 - 100 {
         //     self.trace = true;
         // }
 
@@ -367,7 +376,10 @@ impl<C: Context> Cpu<C> {
             let pc = self.regs.r[15].wrapping_sub(4);
             let s = self.disasm_arm(instr, pc);
             let regs = self.dump_regs();
-            trace!("{pc:08X}: {instr:08X}: {s:24} {regs}");
+            trace!(
+                "{}: {pc:08X}: {instr:08X}: {s:24} {regs}",
+                ctx.now().wrapping_sub(1)
+            );
         }
 
         if self.regs.check_cond((instr >> 28) as u8) {
@@ -392,7 +404,10 @@ impl<C: Context> Cpu<C> {
             let pc = self.regs.r[15].wrapping_sub(2);
             let s = self.disasm_thumb(instr, pc);
             let regs = self.dump_regs();
-            trace!("{pc:08X}:     {instr:04X}: {s:24} {regs}",);
+            trace!(
+                "{}: {pc:08X}:     {instr:04X}: {s:24} {regs}",
+                ctx.now().wrapping_sub(1)
+            );
         }
 
         let ix = instr >> 6;
@@ -404,9 +419,9 @@ impl<C: Context> Cpu<C> {
         assert_eq!(pc & 0x3, 0, "Fetch from unaligned address: 0x{pc:08X}");
 
         self.regs.r[15] = self.regs.r[15].wrapping_add(4);
-        let first = self.fetch_first;
+        let fetch_first = self.fetch_first;
         self.fetch_first = false;
-        ctx.read32(pc, first)
+        ctx.read32(pc, fetch_first)
     }
 
     fn fetch16(&mut self, ctx: &mut impl Context) -> u16 {
@@ -414,9 +429,9 @@ impl<C: Context> Cpu<C> {
         assert_eq!(pc & 0x1, 0, "Fetch from unaligned address: 0x{pc:08X}");
 
         self.regs.r[15] = self.regs.r[15].wrapping_add(2);
-        let first = self.fetch_first;
+        let fetch_first = self.fetch_first;
         self.fetch_first = false;
-        ctx.read16(pc, first)
+        ctx.read16(pc, fetch_first)
     }
 }
 
@@ -1020,13 +1035,13 @@ fn disasm_cond(instr: u32) -> &'static str {
     COND[(instr >> 28) as usize]
 }
 
-fn arm_op_bx<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
+fn arm_op_bx<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u32) {
     // TODO: 2S + 1N cycles
     assert_eq!(instr & 0x0ffffff0, 0x012fff10);
     let rn = (instr & 0xF) as usize;
     let new_pc = cpu.regs.r[rn];
     cpu.regs.state = new_pc & 1 != 0;
-    cpu.set_pc(new_pc & !1);
+    cpu.set_pc(ctx, new_pc & !1);
 }
 
 fn arm_disasm_bx(instr: u32, _pc: u32) -> String {
@@ -1037,14 +1052,14 @@ fn arm_disasm_bx(instr: u32, _pc: u32) -> String {
     format!("bx{cond} r{rn}")
 }
 
-fn arm_op_b<C: Context, const L: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
+fn arm_op_b<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u32) {
     // TODO: 2S + 1N cycles
     let offset = (((instr & 0xFFFFFF) << 8) as i32 >> 8) << 2;
     let old_pc = cpu.regs.r[15];
     if L {
         cpu.regs.r[14] = old_pc.wrapping_sub(4);
     }
-    cpu.set_pc(old_pc.wrapping_add(offset as u32));
+    cpu.set_pc(ctx, old_pc.wrapping_add(offset as u32));
 }
 
 fn arm_disasm_b(instr: u32, pc: u32) -> String {
@@ -1314,7 +1329,7 @@ fn alu<C: Context, const O: u8>(
 
 fn arm_op_alu<C: Context, const I: bool, const S: bool, const O: u8>(
     cpu: &mut Cpu<C>,
-    _ctx: &mut C,
+    ctx: &mut C,
     instr: u32,
 ) {
     let rn = ((instr >> 16) & 0xF) as usize;
@@ -1338,7 +1353,7 @@ fn arm_op_alu<C: Context, const I: bool, const S: bool, const O: u8>(
         if rd != 15 {
             cpu.regs.r[rd] = res;
         } else {
-            cpu.set_pc(res);
+            cpu.set_pc(ctx, res);
             if S {
                 assert!(cpu.regs.mode != MODE_USER);
                 cpu.regs.set_cpsr(cpu.regs.spsr);
@@ -1492,11 +1507,19 @@ fn arm_disasm_msr(instr: u32, _pc: u32) -> String {
     }
 }
 
-fn arm_op_mul<C: Context, const A: bool, const S: bool>(
-    cpu: &mut Cpu<C>,
-    _ctx: &mut C,
-    instr: u32,
-) {
+fn mul_stall(rs: u32) -> u64 {
+    if rs & 0xFFFFFF00 == 0 || rs & 0xFFFFFF00 == 0xFFFFFF00 {
+        1
+    } else if rs & 0xFFFF0000 == 0 || rs & 0xFFFF0000 == 0xFFFF0000 {
+        2
+    } else if rs & 0xFF000000 == 0 || rs & 0xFF000000 == 0xFF000000 {
+        3
+    } else {
+        4
+    }
+}
+
+fn arm_op_mul<C: Context, const A: bool, const S: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u32) {
     // TODO: cycles
 
     let rd = ((instr >> 16) & 0xF) as usize;
@@ -1518,9 +1541,13 @@ fn arm_op_mul<C: Context, const A: bool, const S: bool>(
     let rm = cpu.regs.r[rm];
     let rs = cpu.regs.r[rs];
 
+    let stall = mul_stall(rs);
+
     let res = if !A {
+        ctx.elapse(stall);
         rm.wrapping_mul(rs)
     } else {
+        ctx.elapse(stall + 1);
         let rn = cpu.regs.r[rn];
         rm.wrapping_mul(rs).wrapping_add(rn)
     };
@@ -1550,7 +1577,7 @@ fn arm_disasm_mul(instr: u32, _pc: u32) -> String {
 
 fn arm_op_mull<C: Context, const U: bool, const A: bool, const S: bool>(
     cpu: &mut Cpu<C>,
-    _ctx: &mut C,
+    ctx: &mut C,
     instr: u32,
 ) {
     let rdhi = ((instr >> 16) & 0xF) as usize;
@@ -1573,18 +1600,36 @@ fn arm_op_mull<C: Context, const U: bool, const A: bool, const S: bool>(
     let rs = cpu.regs.r[rs];
 
     let res = if !U {
+        // Unsigned
+        let stall = if rs & 0xFFFFFF00 == 0 {
+            1
+        } else if rs & 0xFFFF0000 == 0 {
+            2
+        } else if rs & 0xFF000000 == 0 {
+            3
+        } else {
+            4
+        };
+
         let res = rm as u64 * rs as u64;
         if !A {
+            ctx.elapse(stall + 1);
             res
         } else {
+            ctx.elapse(stall + 2);
             let acc = cpu.regs.r[rdlo] as u64 | (cpu.regs.r[rdhi] as u64) << 32;
             res.wrapping_add(acc)
         }
     } else {
+        // Signed
+        let stall = mul_stall(rs);
+
         let res = rm as i32 as i64 * rs as i32 as i64;
         let res = if !A {
+            ctx.elapse(stall + 1);
             res
         } else {
+            ctx.elapse(stall + 2);
             let acc = cpu.regs.r[rdlo] as i64 | (cpu.regs.r[rdhi] as i64) << 32;
             res.wrapping_add(acc)
         };
@@ -1719,10 +1764,12 @@ fn arm_op_ldst<
         } else {
             u32::load(ctx, addr, true)
         };
+        cpu.fetch_first = true;
+        ctx.elapse(1);
         if rd != 15 {
             cpu.regs.r[rd] = data;
         } else {
-            cpu.set_pc(data);
+            cpu.set_pc(ctx, data);
         }
     } else {
         // When R15 is the source register (Rd) of a register store (STR) instruction,
@@ -1733,9 +1780,8 @@ fn arm_op_ldst<
         } else {
             u32::store(ctx, addr, data, true);
         }
+        cpu.fetch_first = true;
     }
-
-    cpu.fetch_first = true;
 
     if W || !P {
         // Write-back must not be specified if R15 is specified as the base register (Rn).
@@ -1850,19 +1896,20 @@ fn arm_op_ldsth<
 
     if L {
         let data = T::load(ctx, addr, true);
+        ctx.elapse(1);
+        cpu.fetch_first = true;
         if rd != 15 {
             cpu.regs.r[rd] = data;
         } else {
-            cpu.set_pc(data);
+            cpu.set_pc(ctx, data);
         }
     } else {
         // When R15 is the source register (Rd) of a register store (STR) instruction,
         // the stored value will be address of the instruction plus 12.
         let data = cpu.regs.r[rd].wrapping_add(if rd == 15 { 4 } else { 0 });
         T::store(ctx, addr, data, true);
+        cpu.fetch_first = true;
     }
-
-    cpu.fetch_first = true;
 
     if W || !P {
         // Write-back should not be specified if R15 is specified as the base register (Rn).
@@ -2002,6 +2049,10 @@ fn arm_op_ldstm<
     let mut addr = start;
     let mut first = true;
 
+    if L {
+        ctx.elapse(1);
+    }
+
     for i in 0..16 {
         if instr & (1 << i) == 0 {
             continue;
@@ -2009,16 +2060,18 @@ fn arm_op_ldstm<
 
         if L {
             let data = ctx.read32(addr, first);
+            cpu.fetch_first = true;
             if i != 15 {
                 cpu.regs.r[i] = data;
             } else {
-                cpu.set_pc(data);
+                cpu.set_pc(ctx, data);
             }
         } else {
             // Whenever R15 is stored to memory the stored value is the address of the STM
             // instruction plus 12.
             let data = cpu.regs.r[i].wrapping_add(if i == 15 { 4 } else { 0 });
             ctx.write32(addr, data, first);
+            cpu.fetch_first = true;
         }
         first = false;
 
@@ -2027,10 +2080,6 @@ fn arm_op_ldstm<
 
     if user_bank {
         cpu.regs.change_mode(cur_mode);
-    }
-
-    if !first {
-        cpu.fetch_first = true;
     }
 
     if W {
@@ -2429,7 +2478,7 @@ fn thumb_disasm_alu_imm8(instr: u16, _pc: u32) -> String {
     format!("{mne} r{rd}, #{ofs}")
 }
 
-fn thumb_op_alu<C: Context, const OP: usize>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+fn thumb_op_alu<C: Context, const OP: usize>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
     let rs = ((instr >> 3) & 7) as usize;
     let rd = (instr & 7) as usize;
 
@@ -2478,6 +2527,7 @@ fn thumb_op_alu<C: Context, const OP: usize>(cpu: &mut Cpu<C>, _ctx: &mut C, ins
         0b1101 => {
             let res = op1.wrapping_mul(op2);
             cpu.regs.set_nz(res);
+            ctx.elapse(mul_stall(op1));
             Some(res)
         }
         0b1110 => alu::<C, 0b1110>(cpu, op1, op2, cpu.regs.c_flag, true),
@@ -2518,7 +2568,7 @@ fn thumb_disasm_alu(instr: u16, _pc: u32) -> String {
 
 fn thumb_op_hireg<C: Context, const OP: usize, const H1: bool, const H2: bool>(
     cpu: &mut Cpu<C>,
-    _ctx: &mut C,
+    ctx: &mut C,
     instr: u16,
 ) {
     // If R15 is used as an operand, the value will be the address of the instruction + 4 with
@@ -2541,12 +2591,12 @@ fn thumb_op_hireg<C: Context, const OP: usize, const H1: bool, const H2: bool>(
         if rd != 15 {
             cpu.regs.r[rd] = res;
         } else {
-            cpu.set_pc(res & !1);
+            cpu.set_pc(ctx, res & !1);
         }
     }
 }
 
-fn thumb_op_bx<C: Context, const H: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+fn thumb_op_bx<C: Context, const H: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
     let rs = (H as usize * 8) + ((instr >> 3) & 7) as usize;
     let new_pc = cpu.regs.r[rs] + if rs == 15 { 2 } else { 0 };
 
@@ -2554,7 +2604,7 @@ fn thumb_op_bx<C: Context, const H: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr:
 
     // Executing a BX PC in THUMB state from a non-word aligned address
     // will result in unpredictable execution.
-    cpu.set_pc(new_pc & !1);
+    cpu.set_pc(ctx, new_pc & !1);
 }
 
 fn thumb_disasm_hireg(instr: u16, _pc: u32) -> String {
@@ -2588,6 +2638,7 @@ fn thumb_op_ld_pcrel<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
     let addr = cpu.regs.r[15].wrapping_add(imm as u32 + 2) & !3;
     cpu.regs.r[rd] = u32::load(ctx, addr, true);
     cpu.fetch_first = true;
+    ctx.elapse(1);
 }
 
 fn thumb_disasm_ld_pcrel(instr: u16, _pc: u32) -> String {
@@ -2609,6 +2660,7 @@ fn thumb_op_ldst<C: Context, const L: bool, T: Data>(cpu: &mut Cpu<C>, ctx: &mut
         T::store(ctx, addr, cpu.regs.r[rd], true);
     }
     cpu.fetch_first = true;
+    ctx.elapse(1);
 }
 
 fn thumb_disasm_ldst(instr: u16, _pc: u32) -> String {
@@ -2651,6 +2703,7 @@ fn thumb_op_ldst_ofs<C: Context, const L: bool, T: Data>(
     let addr = cpu.regs.r[rb].wrapping_add(ofs as u32 * size_of::<T>() as u32);
     if L {
         cpu.regs.r[rd] = T::load(ctx, addr, true);
+        ctx.elapse(1);
     } else {
         T::store(ctx, addr, cpu.regs.r[rd], true);
     }
@@ -2684,6 +2737,7 @@ fn thumb_op_ldst_sprel<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C,
     let addr = cpu.regs.r[13].wrapping_add(ofs);
     if L {
         cpu.regs.r[rd] = u32::load(ctx, addr, true);
+        ctx.elapse(1);
     } else {
         u32::store(ctx, addr, cpu.regs.r[rd], true);
     }
@@ -2778,7 +2832,8 @@ fn block_trans<C: Context, const L: bool, const IA: bool, const R: bool>(
         if !L {
             ctx.write32(addr, cpu.regs.r[14], first);
         } else {
-            cpu.set_pc(ctx.read32(addr, first) & !1);
+            let new_pc = ctx.read32(addr, first) & !1;
+            cpu.set_pc(ctx, new_pc);
         }
         first = false;
     }
@@ -2815,7 +2870,8 @@ fn thumb_op_ldstm<C: Context, const L: bool>(cpu: &mut Cpu<C>, ctx: &mut C, inst
     // Empty Rlist: R15 loaded/stored (ARMv4 only), and Rb=Rb+40h (ARMv4-v5).
     if rlist == 0 {
         if L {
-            cpu.set_pc(ctx.read32(cpu.regs.r[rb], true));
+            let new_pc = ctx.read32(cpu.regs.r[rb], true) & !1;
+            cpu.set_pc(ctx, new_pc);
         } else {
             ctx.write32(cpu.regs.r[rb], cpu.regs.r[15].wrapping_add(4), true);
         }
@@ -2833,10 +2889,10 @@ fn thumb_disasm_ldstm(instr: u16, _pc: u32) -> String {
     format!("{mne}ia r{rb}!, {}", fmt_reglist(rlist))
 }
 
-fn thumb_op_cond_branch<C: Context, const COND: usize>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+fn thumb_op_cond_branch<C: Context, const COND: usize>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
     if cpu.regs.check_cond(COND as u8) {
         let offset = (instr as i8) as i32 * 2 + 2;
-        cpu.set_pc(cpu.regs.r[15].wrapping_add(offset as u32));
+        cpu.set_pc(ctx, cpu.regs.r[15].wrapping_add(offset as u32));
     }
 }
 
@@ -2858,10 +2914,10 @@ fn thumb_disasm_swi(instr: u16, _pc: u32) -> String {
     format!("swi {value}")
 }
 
-fn thumb_op_b<C: Context>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+fn thumb_op_b<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
     let offset = ((((instr as u32) << 21) as i32) >> 21) * 2 + 2;
     let dest = cpu.regs.r[15].wrapping_add(offset as u32);
-    cpu.set_pc(dest);
+    cpu.set_pc(ctx, dest);
 }
 
 fn thumb_disasm_b(instr: u16, pc: u32) -> String {
@@ -2870,7 +2926,7 @@ fn thumb_disasm_b(instr: u16, pc: u32) -> String {
     format!("b 0x{dest:08X}")
 }
 
-fn thumb_op_bl<C: Context, const H: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr: u16) {
+fn thumb_op_bl<C: Context, const H: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
     if !H {
         let offset = (((instr as u32) << 21) as i32) >> 21;
         let lr = cpu.regs.r[15]
@@ -2881,7 +2937,7 @@ fn thumb_op_bl<C: Context, const H: bool>(cpu: &mut Cpu<C>, _ctx: &mut C, instr:
         let offset = (instr & 0x7FF) as u32;
         let ret_addr = cpu.regs.r[15];
         let new_pc = cpu.regs.r[14].wrapping_add(offset * 2);
-        cpu.set_pc(new_pc);
+        cpu.set_pc(ctx, new_pc);
         cpu.regs.r[14] = ret_addr | 1;
     }
 }

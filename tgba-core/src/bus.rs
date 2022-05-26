@@ -1,4 +1,4 @@
-use std::{fmt::UpperHex, mem::size_of};
+use std::{cmp::min, fmt::UpperHex, mem::size_of};
 
 use bitvec::prelude::*;
 use log::{debug, info, trace, warn};
@@ -43,9 +43,14 @@ pub struct Bus {
 
     post_boot: u8,
 
+    prefetch_base: u32,
+    prefetched_size: u32,
+    prefetch_start_time: u64,
+
     wait_cycles: WaitCycles,
 }
 
+#[derive(Debug)]
 struct WaitCycles {
     gamepak_rom_1st_8: [u64; 3],
     gamepak_rom_1st_16: [u64; 3],
@@ -92,18 +97,18 @@ impl WaitCycles {
             let ctrl = game_pak_wait_ctrl[ix] as usize;
             let wait_1st = game_pak_rom_wait_cycle(ix, ctrl, true);
             let wait_2nd = game_pak_rom_wait_cycle(ix, ctrl, false);
-            gamepak_rom_1st_8[ix] = wait_1st;
-            gamepak_rom_1st_16[ix] = wait_1st;
-            gamepak_rom_1st_32[ix] = wait_1st + wait_2nd;
-            gamepak_rom_2nd_8[ix] = wait_2nd;
-            gamepak_rom_2nd_16[ix] = wait_2nd;
-            gamepak_rom_2nd_32[ix] = wait_2nd + wait_2nd;
+            gamepak_rom_1st_8[ix] = wait_1st + 1;
+            gamepak_rom_1st_16[ix] = wait_1st + 1;
+            gamepak_rom_1st_32[ix] = wait_1st + wait_2nd + 2;
+            gamepak_rom_2nd_8[ix] = wait_2nd + 1;
+            gamepak_rom_2nd_16[ix] = wait_2nd + 1;
+            gamepak_rom_2nd_32[ix] = wait_2nd + wait_2nd + 2;
         }
 
         let ram_wait = game_pak_ram_wait_cycle(game_pak_ram_wait_ctrl as usize);
-        let gamepak_ram_8 = ram_wait;
-        let gamepak_ram_16 = ram_wait * 2;
-        let gamepak_ram_32 = ram_wait * 3;
+        let gamepak_ram_8 = ram_wait + 1;
+        let gamepak_ram_16 = ram_wait * 2 + 2;
+        let gamepak_ram_32 = ram_wait * 3 + 3;
 
         WaitCycles {
             gamepak_rom_1st_8,
@@ -156,6 +161,10 @@ impl Bus {
 
             post_boot: 0,
 
+            prefetch_base: 0,
+            prefetch_start_time: 0,
+            prefetched_size: 0,
+
             wait_cycles,
         }
     }
@@ -207,9 +216,6 @@ impl Bus {
         for ch in 0..4 {
             self.process_dma(ctx, ch);
         }
-        for ch in 0..2 {
-            ctx.set_sound_dma_request(ch, false);
-        }
 
         self.timers.tick(ctx);
     }
@@ -259,20 +265,8 @@ impl Bus {
             }
 
             0x8..=0xD => {
-                let ix = (addr >> 25) as usize - 4;
-                ctx.elapse(if first {
-                    self.wait_cycles.gamepak_rom_1st_8[ix]
-                } else {
-                    self.wait_cycles.gamepak_rom_2nd_8[ix]
-                });
-
-                let ofs = (addr & 0x01FFFFFF) as usize;
-                if ofs < self.rom.data.len() {
-                    self.rom.data[ofs]
-                } else {
-                    warn!("Read from invalid Game Pak ROM address: {addr:08X}");
-                    0
-                }
+                let ofs = addr & 1;
+                (self.read_rom(ctx, addr & !1, first) >> (ofs * 8)) as u8
             }
 
             0xE..=0xF => {
@@ -330,24 +324,7 @@ impl Bus {
                 read16(&ctx.lcd().oam, (addr & 0x3FE) as usize)
             }
 
-            0x8..=0xD => {
-                let ix = (addr >> 25) as usize - 4;
-                ctx.elapse(if first {
-                    self.wait_cycles.gamepak_rom_1st_16[ix]
-                } else {
-                    self.wait_cycles.gamepak_rom_2nd_16[ix]
-                });
-
-                let ofs = (addr & 0x01FFFFFE) as usize;
-                if ofs < self.rom.data.len() {
-                    read16(&self.rom.data, ofs)
-                } else if self.is_valid_eeprom_addr(addr) {
-                    self.backup.read_eeprom() as u16
-                } else {
-                    warn!("Write to invalid Game Pak ROM address: {addr:08X}");
-                    0
-                }
-            }
+            0x8..=0xD => self.read_rom(ctx, addr & !1, first),
 
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_16);
@@ -409,20 +386,9 @@ impl Bus {
             }
 
             0x8..=0xD => {
-                let ix = (addr >> 25) as usize - 4;
-                ctx.elapse(if first {
-                    self.wait_cycles.gamepak_rom_1st_32[ix]
-                } else {
-                    self.wait_cycles.gamepak_rom_2nd_32[ix]
-                });
-
-                let ofs = (addr & 0x01FFFFFC) as usize;
-                if ofs < self.rom.data.len() {
-                    read32(&self.rom.data, ofs)
-                } else {
-                    warn!("Read from invalid Game Pak ROM address: {addr:08X}");
-                    0
-                }
+                let lo = self.read_rom(ctx, addr & !3, first);
+                let hi = self.read_rom(ctx, (addr & !3) + 2, false);
+                ((hi as u32) << 16) | lo as u32
             }
 
             0xE..=0xF => {
@@ -435,6 +401,69 @@ impl Bus {
                 0
             }
         }
+    }
+
+    fn read_rom(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> u16 {
+        let ws = (addr >> 25) as usize - 4;
+
+        let wc = if first {
+            self.wait_cycles.gamepak_rom_1st_16[ws]
+        } else {
+            self.wait_cycles.gamepak_rom_2nd_16[ws]
+        };
+
+        if self.is_valid_eeprom_addr(addr) {
+            ctx.elapse(wc);
+            return self.backup.read_eeprom() as u16;
+        }
+
+        let addr = addr & 0x01FFFFFE;
+
+        if (addr as usize) >= self.rom.data.len() {
+            ctx.elapse(wc);
+            warn!("Write to invalid Game Pak ROM address: {addr:08X}");
+            return 0;
+        }
+
+        if !self.prefetch_buffer {
+            ctx.elapse(wc);
+        } else {
+            // FIXME: This is too buggy
+
+            let now = ctx.now();
+            let elapsed = now - self.prefetch_start_time;
+            let fetched = elapsed / self.wait_cycles.gamepak_rom_2nd_16[ws];
+            self.prefetched_size = min(8, self.prefetched_size as u64 + fetched) as u32;
+            self.prefetch_start_time = if self.prefetched_size == 8 {
+                now
+            } else {
+                self.prefetch_start_time + fetched * self.wait_cycles.gamepak_rom_2nd_16[ws]
+            };
+
+            // FIXME: address overflow
+            if self.prefetch_base <= addr
+                && addr < self.prefetch_base.wrapping_add(self.prefetched_size * 2)
+            {
+                self.prefetch_base = self.prefetch_base.wrapping_add(2);
+                self.prefetched_size -= 1;
+                ctx.elapse(1);
+
+                // trace!("Prefetch hit:  time: {now}, addr=0x{addr:08X}");
+            } else {
+                if addr == self.prefetch_base {
+                    // trace!("Prefetch miss: time: {now}, addr=0x{addr:08X}, seq");
+                    ctx.elapse(self.wait_cycles.gamepak_rom_2nd_16[ws]);
+                } else {
+                    // trace!("Prefetch miss: time: {now}, addr=0x{addr:08X}, non-seq");
+                    ctx.elapse(self.wait_cycles.gamepak_rom_1st_16[ws]);
+                }
+                self.prefetch_base = addr.wrapping_add(2);
+                self.prefetched_size = 0;
+                self.prefetch_start_time = now;
+            }
+        }
+
+        read16(&self.rom.data, addr as usize)
     }
 
     pub fn write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8, first: bool) {
@@ -619,29 +648,12 @@ fn vram_addr(addr: u32) -> usize {
 impl Bus {
     pub fn io_read8(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
         match addr {
-            0x000..=0x05F => {
-                let data = ctx.lcd_read16(addr & !1);
-                (data >> ((addr & 1) * 8)) as u8
-            }
             0x060..=0x0AF => ctx.sound_read8(addr),
 
-            // KEYINPUT
-            0x130 => self.key_input as u8,
-            0x131 => (self.key_input >> 8) as u8,
-
-            // IME
-            0x208 => ctx.interrupt_mut().master_enable() as u8,
-            0x209 | 0x20A | 0x20B => 0,
-
-            // POSTFLG
-            0x300 => self.post_boot,
-
-            0xF600..=0xFFFF => 0,
-
-            _ => todo!(
-                "IO read8: 0x{addr:03X} ({})",
-                get_io_reg(addr).map_or("N/A", |r| r.name)
-            ),
+            _ => {
+                let data = self.io_read16(ctx, addr & !1);
+                (data >> ((addr & 1) * 8)) as u8
+            }
         }
     }
 
@@ -659,6 +671,14 @@ impl Bus {
                 warn!("Read SIOCNT");
                 0
             }
+            // SIODATA
+            0x12A => {
+                warn!("Read SIODATA8");
+                0
+            }
+
+            // KEYINPUT
+            0x130 => self.key_input,
 
             // KEYCNT
             0x132 => pack! {
@@ -687,11 +707,12 @@ impl Bus {
                 15      => self.game_pak_type,
             },
 
-            0x130 | 0x208 | 0x20A => {
-                let lo = self.io_read8(ctx, addr);
-                let hi = self.io_read8(ctx, addr + 1);
-                lo as u16 | ((hi as u16) << 8)
-            }
+            // IME
+            0x208 => ctx.interrupt_mut().master_enable() as u16,
+            0x20A => 0,
+
+            // POSTFLG
+            0x300 => self.post_boot as u16,
 
             0x100C => 0,
 
@@ -782,7 +803,7 @@ impl Bus {
         match addr {
             0x000..=0x05E => ctx.lcd_write16(addr, data),
             0x060..=0x0AE => ctx.sound_write16(addr, data),
-            0x0B0..=0x0DE => self.write_dma16(addr, data),
+            0x0B0..=0x0DE => self.write_dma16(ctx, addr, data),
             0x0E0..=0x0FE => {}
             0x100..=0x10E => self.timers.write16(addr, data),
             0x110..=0x11E => {}
@@ -843,6 +864,14 @@ impl Bus {
 
                 self.wait_cycles =
                     WaitCycles::new(&self.game_pak_wait_ctrl, self.game_pak_ram_wait_ctrl);
+
+                debug!(
+                    "WaitCycles: prefetch: {}, ram: {}, rom: {:?}, {:#?}",
+                    self.prefetch_buffer,
+                    self.game_pak_ram_wait_ctrl,
+                    self.game_pak_wait_ctrl,
+                    self.wait_cycles
+                );
             }
 
             0x206 | 0x20A | 0x20C..=0x21E | 0x100C => {}
