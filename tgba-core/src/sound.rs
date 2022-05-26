@@ -203,7 +203,6 @@ impl Sound {
         let cgb_amp = if self.output_ratio_gb != 3 {
             1 << self.output_ratio_gb
         } else {
-            // warn!("Invalid Output Ratio for GB sound");
             0
         };
 
@@ -212,8 +211,6 @@ impl Sound {
             let output = cgb_output[i] * cgb_amp / 4 + agb_output[i] * agb_amp / 2 * 4;
             (output * 2).clamp(-32768, 32767) as i16
         });
-
-        // eprintln!("{cgb_output:6?} + {agb_output:6?} = {output:6?}");
 
         AudioSample::new(output[0], output[1])
     }
@@ -632,7 +629,11 @@ impl Wave {
                 self.frequency_timer = 2048 - self.frequency;
                 self.pos = (self.pos + 1) % 64;
 
-                let pos = (self.ram_bank as u8 * 32 + self.pos) % if !self.steps { 32 } else { 64 };
+                let pos = if !self.steps {
+                    self.ram_bank as u8 * 32 + self.pos % 32
+                } else {
+                    (self.ram_bank as u8 * 32 + self.pos) % 64
+                };
                 let v = self.ram[pos as usize / 2];
                 self.sample_latch = if pos % 2 == 0 { v >> 4 } else { v & 0x0F };
             }
@@ -913,11 +914,6 @@ impl DirectSound {
         }
 
         if self.fifo.len() <= 16 {
-            // eprintln!(
-            //     "Sound DMA Requested {}: current: {:?}",
-            //     self.ch, self.current_output
-            // );
-
             ctx.set_sound_dma_request(self.ch, true);
         }
     }
@@ -1083,6 +1079,10 @@ impl Sound {
                 self.output_ratio_gb = v[0..=1].load();
                 self.output_ratio_direct_sound[0] = v[2];
                 self.output_ratio_direct_sound[1] = v[3];
+
+                if self.output_ratio_gb == 3 {
+                    warn!("Invalid Output Ratio for GB sound");
+                }
             }
             0x083 => {
                 let v = data.view_bits::<Lsb0>();
