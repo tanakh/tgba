@@ -33,6 +33,7 @@ pub struct Dma {
     irq_enable: bool,
     dma_enable: bool,
 
+    wait_for_exec: bool,
     src_addr_internal: u32,
     dest_addr_internal: u32,
     word_count_internal: u32,
@@ -64,6 +65,7 @@ impl Dma {
             irq_enable: false,
             dma_enable: false,
 
+            wait_for_exec: false,
             src_addr_internal: 0,
             dest_addr_internal: 0,
             word_count_internal: 0,
@@ -80,9 +82,9 @@ impl Dma {
                 || self.start_timing == StartTiming::Special as u8)
     }
 
-    fn check_dma_start(&self, ctx: &mut impl Context) -> bool {
+    fn check_dma_start(&mut self, ctx: &mut impl Context) -> bool {
         match self.start_timing {
-            enum_pat!(StartTiming::Immediately) => true,
+            enum_pat!(StartTiming::Immediately) => self.wait_for_exec,
             // Start in a V-blank interval
             enum_pat!(StartTiming::VBlank) => {
                 self.prev_dma_frame != ctx.lcd().frame() && ctx.lcd().vblank()
@@ -96,8 +98,11 @@ impl Dma {
             enum_pat!(StartTiming::Special) => match self.ch {
                 // Prohibited
                 0 => false,
-                1 => ctx.sound_dma_request(0),
-                2 => ctx.sound_dma_request(1),
+                1 | 2 => {
+                    let ret = ctx.sound_dma_request(self.ch as u8 - 1);
+                    ctx.set_sound_dma_request(self.ch as u8 - 1, false);
+                    ret
+                }
                 3 => {
                     // TODO: Video capture
                     false
@@ -181,7 +186,7 @@ impl Bus {
             return;
         }
 
-        if !self.dma(ch).check_dma_start(ctx) {
+        if !self.dma_mut(ch).check_dma_start(ctx) {
             return;
         }
 
@@ -255,7 +260,7 @@ impl Bus {
                 (0..16)
                     .map(|i| {
                         let addr = self.dma(ch).src_addr_internal;
-                        self.ram[(addr + i) as usize % 0x7FFF]
+                        self.ram[(addr + i) as usize & 0x7FFF]
                     })
                     .collect()
             } else {
@@ -306,6 +311,8 @@ impl Bus {
                 self.dma(ch).dest_addr_internal.wrapping_add(dest_inc);
         }
 
+        self.dma_mut(ch).wait_for_exec = false;
+
         if !self.dma(ch).repeat() {
             self.dma_mut(ch).dma_enable = false;
         } else if self.dma(ch).dest_addr_ctrl == 3 {
@@ -354,7 +361,7 @@ impl Bus {
         }
     }
 
-    pub fn write_dma16(&mut self, addr: u32, data: u16) {
+    pub fn write_dma16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
         match addr {
             // DMAxSAD
             0x0B0 | 0x0BC | 0x0C8 | 0x0D4 => {
@@ -370,12 +377,12 @@ impl Bus {
             // DMAxDAD
             0x0B4 | 0x0C0 | 0x0CC | 0x0D8 => {
                 let ch = ((addr - 0x0B0) / 0xC) as usize;
-                self.dma_mut(ch).dest_addr.view_bits_mut::<Lsb0>()[0..=15].store(data)
+                self.dma_mut(ch).dest_addr.view_bits_mut::<Lsb0>()[0..=15].store(data);
             }
             0x0B6 | 0x0C2 | 0x0CE | 0x0DA => {
                 let ch = ((addr - 0x0B0) / 0xC) as usize;
                 let hi = if ch != 3 { 26 } else { 27 };
-                self.dma_mut(ch).dest_addr.view_bits_mut::<Lsb0>()[16..=hi].store(data)
+                self.dma_mut(ch).dest_addr.view_bits_mut::<Lsb0>()[16..=hi].store(data);
             }
 
             // DMAxCNT
@@ -402,6 +409,7 @@ impl Bus {
 
                 if !dma.dma_enable && v[15] {
                     // Reload src addr, dest addr and word count
+                    dma.wait_for_exec = true;
                     dma.src_addr_internal = dma.src_addr;
                     dma.dest_addr_internal = dma.dest_addr;
                     dma.word_count_internal = dma.word_count;
