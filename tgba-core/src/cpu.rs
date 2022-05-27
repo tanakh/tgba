@@ -315,8 +315,6 @@ impl<C: Context> Cpu<C> {
         }
 
         if !self.regs.irq_disable && ctx.interrupt().irq() {
-            debug!("IRQ occured: cycle {}", ctx.now());
-
             ctx.interrupt_mut().set_halt(false);
             self.exception(Exception::IRQ);
             // FIXME: correct time
@@ -376,10 +374,7 @@ impl<C: Context> Cpu<C> {
             let pc = self.regs.r[15].wrapping_sub(4);
             let s = self.disasm_arm(instr, pc);
             let regs = self.dump_regs();
-            trace!(
-                "{}: {pc:08X}: {instr:08X}: {s:24} {regs}",
-                ctx.now().wrapping_sub(1)
-            );
+            trace!("{pc:08X}: {instr:08X}: {s:24} {regs}");
         }
 
         if self.regs.check_cond((instr >> 28) as u8) {
@@ -404,10 +399,7 @@ impl<C: Context> Cpu<C> {
             let pc = self.regs.r[15].wrapping_sub(2);
             let s = self.disasm_thumb(instr, pc);
             let regs = self.dump_regs();
-            trace!(
-                "{}: {pc:08X}:     {instr:04X}: {s:24} {regs}",
-                ctx.now().wrapping_sub(1)
-            );
+            trace!("{pc:08X}:     {instr:04X}: {s:24} {regs}");
         }
 
         let ix = instr >> 6;
@@ -1758,6 +1750,12 @@ fn arm_op_ldst<
 
     let addr = if P { ea } else { base };
 
+    if W || !P {
+        // Write-back must not be specified if R15 is specified as the base register (Rn).
+        assert_ne!(rn, 15);
+        cpu.regs.r[rn] = ea;
+    }
+
     if L {
         let data = if B {
             u8::load(ctx, addr, true)
@@ -1781,12 +1779,6 @@ fn arm_op_ldst<
             u32::store(ctx, addr, data, true);
         }
         cpu.fetch_first = true;
-    }
-
-    if W || !P {
-        // Write-back must not be specified if R15 is specified as the base register (Rn).
-        assert_ne!(rn, 15);
-        cpu.regs.r[rn] = ea;
     }
 }
 
@@ -1894,6 +1886,12 @@ fn arm_op_ldsth<
 
     let addr = if P { ea } else { base };
 
+    if W || !P {
+        // Write-back should not be specified if R15 is specified as the base register (Rn).
+        assert_ne!(rn, 15);
+        cpu.regs.r[rn] = ea;
+    }
+
     if L {
         let data = T::load(ctx, addr, true);
         ctx.elapse(1);
@@ -1909,12 +1907,6 @@ fn arm_op_ldsth<
         let data = cpu.regs.r[rd].wrapping_add(if rd == 15 { 4 } else { 0 });
         T::store(ctx, addr, data, true);
         cpu.fetch_first = true;
-    }
-
-    if W || !P {
-        // Write-back should not be specified if R15 is specified as the base register (Rn).
-        assert_ne!(rn, 15);
-        cpu.regs.r[rn] = ea;
     }
 }
 
@@ -2010,8 +2002,6 @@ fn arm_op_ldstm<
         }
     };
 
-    // trace!("arm_op_ldstm: base:{base:08x}, pre:{PRE}, up:{UP}, wb:{W}, s:{S}");
-
     let cur_mode = cpu.regs.mode;
 
     let user_bank = if S {
@@ -2038,20 +2028,34 @@ fn arm_op_ldstm<
         cpu.regs.change_mode(MODE_USER);
     }
 
-    // FIXME:
-    // When write-back is specified, the base is written back at the end of the second cycle
-    // of the instruction. During a STM, the first register is written out at the start of the
-    // second cycle. A STM which includes storing the base, with the base as the first register
-    // to be stored, will therefore store the unchanged value, whereas with the base second
-    // or later in the transfer order, will store the modified value. A LDM will always overwrite
-    // the updated base if the base is in the list.
-
-    let mut addr = start;
-    let mut first = true;
-
     if L {
         ctx.elapse(1);
     }
+
+    // A STM which includes storing the base, with the base as the
+    // first register to be stored, will therefore store the
+    // unchanged value, whereas with the base second or later
+    // in the transfer order, will store the modified value.
+
+    // A LDM will always overwrite the updated base if the base is in the list.
+
+    let mut addr = start;
+    let mut first = true;
+    let mut wb_done = false;
+
+    let mut wb = |cpu: &mut Cpu<C>| {
+        if W && !wb_done {
+            // FIXME: is this correct?
+            if user_bank {
+                cpu.regs.change_mode(cur_mode);
+            }
+            cpu.regs.r[rn] = end;
+            wb_done = true;
+            if user_bank {
+                cpu.regs.change_mode(MODE_USER);
+            }
+        }
+    };
 
     for i in 0..16 {
         if instr & (1 << i) == 0 {
@@ -2059,6 +2063,8 @@ fn arm_op_ldstm<
         }
 
         if L {
+            wb(cpu);
+
             let data = ctx.read32(addr, first);
             cpu.fetch_first = true;
             if i != 15 {
@@ -2072,19 +2078,17 @@ fn arm_op_ldstm<
             let data = cpu.regs.r[i].wrapping_add(if i == 15 { 4 } else { 0 });
             ctx.write32(addr, data, first);
             cpu.fetch_first = true;
+
+            wb(cpu);
         }
         first = false;
-
         addr = addr.wrapping_add(4)
     }
 
+    wb(cpu);
+
     if user_bank {
         cpu.regs.change_mode(cur_mode);
-    }
-
-    if W {
-        assert!(!user_bank);
-        cpu.regs.r[rn] = end;
     }
 }
 
