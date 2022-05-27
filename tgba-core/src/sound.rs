@@ -170,18 +170,15 @@ impl Sound {
             self.noise.output(),
         ];
 
-        // normalize each channel to -2048..2047
+        // each channel's output are normalized to -4096..4096
 
         let mut cgb_output = [0, 0];
 
         for ch in 0..4 {
-            if let Some(output) = ch_output[ch] {
-                // cgb channel outputs' range is 0..15
-                let output = output as i32 * 256 - 2048;
-                for lr in 0..2 {
-                    if self.channel_ctrl[lr].output_ch[ch] {
-                        cgb_output[lr] += output * self.channel_ctrl[lr].volume as i32 / 8;
-                    }
+            let output = ch_output[ch] as i32;
+            for lr in 0..2 {
+                if self.channel_ctrl[lr].output_ch[ch] {
+                    cgb_output[lr] += output * self.channel_ctrl[lr].volume as i32 / 8;
                 }
             }
         }
@@ -191,7 +188,7 @@ impl Sound {
         for ch in 0..2 {
             if let Some(output) = self.direct_sound[ch].current_output {
                 // agb channel outputs' range is -128..127
-                let output = output as i8 as i32 * 16;
+                let output = output as i8 as i32 * 32;
                 for lr in 0..2 {
                     if self.direct_sound[ch].output[lr] {
                         agb_output[lr] += output;
@@ -208,7 +205,7 @@ impl Sound {
 
         let output = [0, 1].map(|i| {
             let agb_amp = self.output_ratio_direct_sound[i] as i32 + 1;
-            let output = cgb_output[i] * cgb_amp / 4 + agb_output[i] * agb_amp / 2 * 4;
+            let output = cgb_output[i] * cgb_amp / 4 + agb_output[i] * agb_amp * 4 / 2;
             (output * 2).clamp(-32768, 32767) as i16
         });
 
@@ -494,8 +491,7 @@ impl Pulse {
         }
     }
 
-    // return Some(0..=15) value if the channel is enabled, otherwise None
-    fn output(&self) -> Option<u8> {
+    fn output(&self) -> i16 {
         const WAVEFORM: [[u8; 8]; 4] = [
             [0, 0, 0, 0, 0, 0, 0, 1],
             [1, 0, 0, 0, 0, 0, 0, 1],
@@ -504,9 +500,11 @@ impl Pulse {
         ];
 
         if !self.on {
-            None
+            0
         } else {
-            Some(WAVEFORM[self.duty as usize][self.phase as usize] * self.current_volume)
+            (WAVEFORM[self.duty as usize][self.phase as usize] as i16 * 2 - 1)
+                * self.current_volume as i16
+                * 256
         }
     }
 }
@@ -665,17 +663,22 @@ impl Wave {
         }
     }
 
-    fn output(&self) -> Option<u8> {
-        if self.on {
-            if self.output_level_75 {
-                Some(self.sample_latch * 3 / 4)
-            } else if self.output_level == 0 {
-                None
-            } else {
-                Some(self.sample_latch >> (self.output_level - 1))
-            }
+    fn output(&self) -> i16 {
+        if !self.on {
+            0
         } else {
-            None
+            let amp = if self.output_level_75 {
+                3
+            } else if self.output_level == 0 {
+                0
+            } else if self.output_level == 1 {
+                1
+            } else if self.output_level == 2 {
+                2
+            } else {
+                4
+            };
+            (self.sample_latch as i16 * 2 - 15) * 128 * amp / 4
         }
     }
 }
@@ -857,16 +860,16 @@ impl Noise {
         }
     }
 
-    fn output(&mut self) -> Option<u8> {
-        if !self.on || self.current_volume == 0 {
-            None
+    fn output(&mut self) -> i16 {
+        if !self.on {
+            0
         } else {
             let sample_acc = self.sample_acc + ((self.lsfr & 1) ^ 1) as usize;
             let sample_count = self.sample_count + 1;
-            let ret = sample_acc * self.current_volume as usize / sample_count;
             self.sample_acc = 0;
             self.sample_count = 0;
-            Some(ret as u8)
+            ((sample_acc as i32 * 512 / sample_count as i32 - 256) * self.current_volume as i32)
+                as i16
         }
     }
 }
