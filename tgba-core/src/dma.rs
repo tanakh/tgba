@@ -1,5 +1,5 @@
 use bitvec::prelude::*;
-use log::{log_enabled, trace, warn};
+use log::{trace, warn};
 
 use crate::{
     backup::eeprom::EepromSize,
@@ -255,32 +255,17 @@ impl Bus {
             }
         };
 
-        if log_enabled!(log::Level::Trace) {
-            let src = if ch == 1 && self.dma(ch).start_timing == 3 {
-                (0..16)
-                    .map(|i| {
-                        let addr = self.dma(ch).src_addr_internal;
-                        self.ram[(addr + i) as usize & 0x7FFF]
-                    })
-                    .collect()
-            } else {
-                vec![]
-            };
-
-            self.dma(ch).trace(ctx, &src);
-        }
-
         for i in 0..word_count {
             if word_len == 4 {
                 if self.dma(ch).src_addr_internal % 4 != 0 {
                     warn!(
-                        "DMA src addr misaligned: {}",
+                        "DMA src addr misaligned: 0x{:08X}",
                         self.dma(ch).src_addr_internal
                     );
                 }
                 if self.dma(ch).dest_addr_internal % 4 != 0 {
                     warn!(
-                        "DMA dest addr misaligned: {}",
+                        "DMA dest addr misaligned: 0x{:08X}",
                         self.dma(ch).dest_addr_internal
                     );
                 }
@@ -290,13 +275,13 @@ impl Bus {
             } else {
                 if self.dma(ch).src_addr_internal % 2 != 0 {
                     warn!(
-                        "DMA src addr misaligned: {}",
+                        "DMA src addr misaligned: 0x{:08X}",
                         self.dma(ch).src_addr_internal
                     );
                 }
                 if self.dma(ch).dest_addr_internal % 2 != 0 {
                     warn!(
-                        "DMA dest addr misaligned: {}",
+                        "DMA dest addr misaligned: 0x{:08X}",
                         self.dma(ch).dest_addr_internal
                     );
                 }
@@ -409,7 +394,9 @@ impl Bus {
 
                 if !dma.dma_enable && v[15] {
                     // Reload src addr, dest addr and word count
-                    dma.wait_for_exec = true;
+                    if dma.start_timing == StartTiming::Immediately as u8 {
+                        dma.wait_for_exec = true;
+                    }
                     dma.src_addr_internal = dma.src_addr;
                     dma.dest_addr_internal = dma.dest_addr;
                     dma.word_count_internal = dma.word_count;
