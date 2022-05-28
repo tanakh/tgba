@@ -26,8 +26,8 @@ pub trait Lcd {
 
     fn lcd_tick(&mut self);
 
-    fn lcd_read16(&mut self, addr: u32) -> u16;
-    fn lcd_write16(&mut self, addr: u32, data: u16);
+    fn lcd_read(&mut self, addr: u32) -> u8;
+    fn lcd_write(&mut self, addr: u32, data: u8);
 }
 
 #[delegatable_trait]
@@ -169,11 +169,11 @@ impl Lcd for Inner2 {
         self.lcd.tick(&mut self.inner);
     }
 
-    fn lcd_read16(&mut self, addr: u32) -> u16 {
-        self.lcd.read16(&mut self.inner, addr)
+    fn lcd_read(&mut self, addr: u32) -> u8 {
+        self.lcd.read(&mut self.inner, addr)
     }
-    fn lcd_write16(&mut self, addr: u32, data: u16) {
-        self.lcd.write16(&mut self.inner, addr, data)
+    fn lcd_write(&mut self, addr: u32, data: u8) {
+        self.lcd.write(&mut self.inner, addr, data)
     }
 }
 

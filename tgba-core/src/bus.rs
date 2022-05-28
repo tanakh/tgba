@@ -472,7 +472,7 @@ impl Bus {
         match addr >> 24 {
             0x0..=0x1 => {
                 // FIXME: ???
-                warn!("Write to BIOS");
+                warn!("Write to BIOS: 0x{addr:08X}:8");
             }
             0x2 => {
                 ctx.elapse(3);
@@ -511,7 +511,7 @@ impl Bus {
                 // This seems to be ignored
             }
 
-            0x8..=0xD => warn!("Write 8bit data to ROM"),
+            0x8..=0xD => warn!("Write 8bit data to ROM: 0x{addr:08X} = 0x{data:02X}"),
 
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_8);
@@ -526,7 +526,7 @@ impl Bus {
 
         match addr >> 24 {
             0x0..=0x1 => {
-                warn!("Write to BIOS");
+                warn!("Write to BIOS: 0x{addr:08X}:16");
             }
             0x2 => {
                 ctx.elapse(3);
@@ -587,7 +587,7 @@ impl Bus {
 
         match addr >> 24 {
             0x0..=0x1 => {
-                warn!("Write to BIOS");
+                warn!("Write to BIOS: 0x{addr:08X}:32");
             }
             0x2 => {
                 ctx.elapse(6);
@@ -620,7 +620,7 @@ impl Bus {
                 write32(&mut ctx.lcd_mut().oam, (addr & 0x3FC) as usize, data);
             }
 
-            0x8..=0xD => warn!("Write 32bit data to ROM"),
+            0x8..=0xD => warn!("Write 32bit data to ROM: 0x{addr:08X} = 0x{data:08X}"),
 
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_32);
@@ -648,6 +648,7 @@ fn vram_addr(addr: u32) -> usize {
 impl Bus {
     pub fn io_read8(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
         match addr {
+            0x000..=0x05E => ctx.lcd_read(addr),
             0x060..=0x0AF => ctx.sound_read8(addr),
 
             _ => {
@@ -659,7 +660,11 @@ impl Bus {
 
     pub fn io_read16(&mut self, ctx: &mut impl Context, addr: u32) -> u16 {
         match addr {
-            0x000..=0x05E => ctx.lcd_read16(addr),
+            0x000..=0x05E => {
+                let lo = ctx.lcd_read(addr);
+                let hi = ctx.lcd_read(addr + 1);
+                (hi as u16) << 8 | lo as u16
+            }
             0x060..=0x0AE => ctx.sound_read16(addr),
             0x0B0..=0x0DE => self.read_dma16(addr),
             0x0E0..=0x0FE => 0,
@@ -727,11 +732,7 @@ impl Bus {
 
     pub fn io_write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8) {
         match addr {
-            0x000..=0x05F => {
-                warn!(
-                    "Writing 8bit data to LCD registers are ignored: 0x{addr:03X} = 0x{data:02X}"
-                );
-            }
+            0x000..=0x05F => ctx.lcd_write(addr, data),
             0x060..=0x0AF => ctx.sound_write8(addr, data),
 
             // SIODATA
@@ -801,7 +802,10 @@ impl Bus {
 
     pub fn io_write16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
         match addr {
-            0x000..=0x05E => ctx.lcd_write16(addr, data),
+            0x000..=0x05E => {
+                ctx.lcd_write(addr, data as u8);
+                ctx.lcd_write(addr + 1, (data >> 8) as u8);
+            }
             0x060..=0x0AE => ctx.sound_write16(addr, data),
             0x0B0..=0x0DE => self.write_dma16(ctx, addr, data),
             0x0E0..=0x0FE => {}

@@ -325,7 +325,7 @@ impl Lcd {
         self.y == self.vcount as u32
     }
 
-    pub fn read16(&mut self, _ctx: &mut impl Context, addr: u32) -> u16 {
+    pub fn read(&mut self, _ctx: &mut impl Context, addr: u32) -> u8 {
         match addr {
             // DISPCNT
             0x000 => pack! {
@@ -334,16 +334,18 @@ impl Lcd {
                 5 => self.hblank_obj_process,
                 6 => self.obj_format,
                 7 => self.force_blank,
-                8 => self.display_bg[0],
-                9 => self.display_bg[1],
-                10 => self.display_bg[2],
-                11 => self.display_bg[3],
-                12 => self.display_obj,
-                13 => self.display_window[0],
-                14 => self.display_window[1],
-                15 => self.display_obj_window,
             },
-            0x002 => 0,
+            0x001 => pack! {
+                0 => self.display_bg[0],
+                1 => self.display_bg[1],
+                2 => self.display_bg[2],
+                3 => self.display_bg[3],
+                4 => self.display_obj,
+                5 => self.display_window[0],
+                6 => self.display_window[1],
+                7 => self.display_obj_window,
+            },
+            0x002 | 0x003 => 0,
 
             // DISPSTAT
             0x004 => pack! {
@@ -353,101 +355,74 @@ impl Lcd {
                 3 => self.vblank_irq_enable,
                 4 => self.hblank_irq_enable,
                 5 => self.vcount_irq_enable,
-                8..=15 => self.vcount,
             },
+            0x005 => self.vcount,
 
             // VCOUNT
-            0x006 => self.y as u16,
+            0x006 => self.y as u8,
+            0x007 => 0,
 
             // BGxCNT
             0x008 | 0x00A | 0x00C | 0x00E => {
-                let i = ((addr - 0x008) / 2) as usize;
-                let bg_ctrl = &mut self.bg[i];
+                let bg_ctrl = &self.bg[(addr as usize - 8) / 2];
                 pack! {
                     0..=1   => bg_ctrl.priority,
                     2..=3   => bg_ctrl.char_base_block,
                     4..=5   => !0,
                     6       => bg_ctrl.mosaic,
                     7       => bg_ctrl.color_mode,
-                    8..=12  => bg_ctrl.screen_base_block,
-                    13      => bg_ctrl.area_overflow,
-                    14..=15 => bg_ctrl.screen_size,
+                }
+            }
+            0x009 | 0x00B | 0x00D | 0x00F => {
+                let bg_ctrl = &self.bg[(addr as usize - 8) / 2];
+                pack! {
+                    0..=4 => bg_ctrl.screen_base_block,
+                    5     => bg_ctrl.area_overflow,
+                    6..=7 => bg_ctrl.screen_size,
                 }
             }
 
-            // BGxHOFS
-            0x010 | 0x014 | 0x018 | 0x01C => 0,
-            // BGxVOFS
-            0x012 | 0x016 | 0x01A | 0x01E => 0,
-            // BGxPA
-            0x020 | 0x030 => 0,
-            // BGxPB
-            0x022 | 0x032 => 0,
-            // BGxPC
-            0x024 | 0x034 => 0,
-            // BGxPD
-            0x026 | 0x036 => 0,
-
-            // BGxX
-            0x028 | 0x038 => 0,
-            0x02A | 0x03A => 0,
-            // BGxY
-            0x02C | 0x03C => 0,
-            0x02E | 0x03E => 0,
-
-            // WINxH
-            0x040 | 0x042 => 0,
-            // WINxV
-            0x044 | 0x046 => 0,
+            0x010..=0x047 => 0,
 
             // WININ / WINOUT
-            0x048 | 0x04A => {
-                let mut data = 0;
-                let v = data.view_bits_mut::<Lsb0>();
-                for i in 0..2 {
-                    let ctrl = if addr == 0x048 {
-                        &mut self.winin[i]
-                    } else {
-                        if i == 0 {
-                            &mut self.winout
-                        } else {
-                            &mut self.objwin
-                        }
-                    };
-
-                    for j in 0..4 {
-                        v.set(i * 8 + j, ctrl.display_bg[j]);
-                    }
-                    v.set(i * 8 + 4, ctrl.display_obj);
-                    v.set(i * 8 + 5, ctrl.color_special_effect);
+            0x048..=0x04B => {
+                let w = match addr {
+                    0x048 => &self.winin[0],
+                    0x049 => &self.winin[1],
+                    0x04A => &self.winout,
+                    0x04B => &self.objwin,
+                    _ => unreachable!(),
+                };
+                pack! {
+                    0 => w.display_bg[0],
+                    1 => w.display_bg[1],
+                    2 => w.display_bg[2],
+                    3 => w.display_bg[3],
+                    4 => w.display_obj,
+                    5 => w.color_special_effect,
                 }
-                data
             }
 
-            // MOSAIC
-            0x04C | 0x04E => 0,
+            0x04C..=0x4F => 0,
 
             // BLDCNT
             0x050 => pack! {
                 6..=7  => self.blend_ctrl.effect,
                 0..=5  => self.blend_ctrl.target[0],
-                8..=13 => self.blend_ctrl.target[1],
             },
-            // BLDALPHA
-            0x052 => pack! {
-                0..=4  => self.blend_ctrl.eva,
-                8..=12 => self.blend_ctrl.evb,
-            },
-            // BLDY
-            0x054 => 0,
+            0x051 => self.blend_ctrl.target[1],
 
-            0x056..=0x05E => 0,
+            // BLDALPHA
+            0x052 => self.blend_ctrl.eva,
+            0x053 => self.blend_ctrl.evb,
+
+            0x054..=0x05F => 0,
 
             _ => unreachable!("{addr:03X}"),
         }
     }
 
-    pub fn write16(&mut self, _ctx: &mut impl Context, addr: u32, data: u16) {
+    pub fn write(&mut self, _ctx: &mut impl Context, addr: u32, data: u8) {
         match addr {
             // DISPCNT
             0x000 => {
@@ -457,16 +432,19 @@ impl Lcd {
                 self.hblank_obj_process = v[5];
                 self.obj_format = v[6];
                 self.force_blank = v[7];
-                self.display_bg[0] = v[8];
-                self.display_bg[1] = v[9];
-                self.display_bg[2] = v[10];
-                self.display_bg[3] = v[11];
-                self.display_obj = v[12];
-                self.display_window[0] = v[13];
-                self.display_window[1] = v[14];
-                self.display_obj_window = v[15];
             }
-            0x002 => {}
+            0x001 => {
+                let v = data.view_bits::<Lsb0>();
+                self.display_bg[0] = v[0];
+                self.display_bg[1] = v[1];
+                self.display_bg[2] = v[2];
+                self.display_bg[3] = v[3];
+                self.display_obj = v[4];
+                self.display_window[0] = v[5];
+                self.display_window[1] = v[6];
+                self.display_obj_window = v[7];
+            }
+            0x002 | 0x003 => {}
 
             // DISPSTAT
             0x004 => {
@@ -474,117 +452,150 @@ impl Lcd {
                 self.vblank_irq_enable = v[3];
                 self.hblank_irq_enable = v[4];
                 self.vcount_irq_enable = v[5];
-                self.vcount = v[8..=15].load();
             }
+            0x005 => self.vcount = data,
 
             // VCOUNT
-            0x006 => {}
+            0x006 | 0x007 => {}
 
             // BGxCNT
             0x008 | 0x00A | 0x00C | 0x00E => {
-                let i = ((addr - 0x008) / 2) as usize;
+                let i = (addr as usize - 8) / 2;
                 let bg_ctrl = &mut self.bg[i];
                 let v = data.view_bits::<Lsb0>();
                 bg_ctrl.priority = v[0..=1].load();
                 bg_ctrl.char_base_block = v[2..=3].load();
                 bg_ctrl.mosaic = v[6];
                 bg_ctrl.color_mode = v[7];
-                bg_ctrl.screen_base_block = v[8..=12].load();
+            }
+            0x009 | 0x00B | 0x00D | 0x00F => {
+                let i = (addr as usize - 8) / 2;
+                let bg_ctrl = &mut self.bg[i];
+                let v = data.view_bits::<Lsb0>();
+                bg_ctrl.screen_base_block = v[0..=4].load();
                 if i == 2 || i == 3 {
-                    bg_ctrl.area_overflow = v[13];
+                    bg_ctrl.area_overflow = v[5];
                 }
-                bg_ctrl.screen_size = v[14..=15].load();
+                bg_ctrl.screen_size = v[6..=7].load();
             }
 
             // BGxHOFS
             0x010 | 0x014 | 0x018 | 0x01C => {
-                let i = ((addr - 0x010) / 4) as usize;
-                self.bg[i].hofs = data & 0x1FF;
+                let i = (addr as usize - 0x10) / 4;
+                self.bg[i].hofs.view_bits_mut::<Lsb0>()[0..=7].store(data);
+            }
+            0x011 | 0x015 | 0x019 | 0x01D => {
+                let i = (addr as usize - 0x10) / 4;
+                self.bg[i].hofs.view_bits_mut::<Lsb0>()[8..=8].store(data);
             }
 
             // BGxVOFS
             0x012 | 0x016 | 0x01A | 0x01E => {
-                let i = ((addr - 0x012) / 4) as usize;
-                self.bg[i].vofs = data & 0x1FF;
+                let i = (addr as usize - 0x10) / 4;
+                self.bg[i].vofs.view_bits_mut::<Lsb0>()[0..=7].store(data);
+            }
+            0x013 | 0x017 | 0x01B | 0x01F => {
+                let i = (addr as usize - 0x10) / 4;
+                self.bg[i].vofs.view_bits_mut::<Lsb0>()[8..=8].store(data);
             }
 
             // BGxPA
             0x020 | 0x030 => {
-                let i = (2 + (addr - 0x020) / 0x10) as usize;
-                self.bg[i].dx = data;
+                self.bg[addr as usize / 0x10].dx.view_bits_mut::<Lsb0>()[0..=7].store(data);
+            }
+            0x021 | 0x031 => {
+                self.bg[addr as usize / 0x10].dx.view_bits_mut::<Lsb0>()[8..=15].store(data);
             }
             // BGxPB
             0x022 | 0x032 => {
-                let i = (2 + (addr - 0x022) / 0x10) as usize;
-                self.bg[i].dmx = data;
+                self.bg[addr as usize / 0x10].dmx.view_bits_mut::<Lsb0>()[0..=7].store(data);
+            }
+            0x023 | 0x033 => {
+                self.bg[addr as usize / 0x10].dmx.view_bits_mut::<Lsb0>()[8..=15].store(data);
             }
             // BGxPC
             0x024 | 0x034 => {
-                let i = (2 + (addr - 0x024) / 0x10) as usize;
-                self.bg[i].dy = data;
+                self.bg[addr as usize / 0x10].dy.view_bits_mut::<Lsb0>()[0..=7].store(data);
+            }
+            0x025 | 0x035 => {
+                self.bg[addr as usize / 0x10].dy.view_bits_mut::<Lsb0>()[8..=15].store(data);
             }
             // BGxPD
             0x026 | 0x036 => {
-                let i = (2 + (addr - 0x026) / 0x10) as usize;
-                self.bg[i].dmy = data;
+                self.bg[addr as usize / 0x10].dmy.view_bits_mut::<Lsb0>()[0..=7].store(data);
+            }
+            0x027 | 0x037 => {
+                self.bg[addr as usize / 0x10].dmy.view_bits_mut::<Lsb0>()[8..=15].store(data);
             }
 
             // BGxX
             0x028 | 0x038 => {
-                let i = (2 + (addr - 0x028) / 0x10) as usize;
-                self.bg[i].x.view_bits_mut::<Lsb0>()[0..=15].store(data);
+                let i = addr as usize / 0x10;
+                self.bg[i].x.view_bits_mut::<Lsb0>()[0..=7].store(data);
+                self.bg[i].cx = self.bg[i].x;
+            }
+            0x029 | 0x039 => {
+                let i = addr as usize / 0x10;
+                self.bg[i].x.view_bits_mut::<Lsb0>()[8..=15].store(data);
                 self.bg[i].cx = self.bg[i].x;
             }
             0x02A | 0x03A => {
-                let i = (2 + (addr - 0x028) / 0x10) as usize;
-                self.bg[i].x.view_bits_mut::<Lsb0>()[16..=27].store(data);
+                let i = addr as usize / 0x10;
+                self.bg[i].x.view_bits_mut::<Lsb0>()[16..=23].store(data);
+                self.bg[i].cx = self.bg[i].x;
+            }
+            0x02B | 0x03B => {
+                let i = addr as usize / 0x10;
+                self.bg[i].x.view_bits_mut::<Lsb0>()[24..=27].store(data);
                 self.bg[i].cx = self.bg[i].x;
             }
             // BGxY
             0x02C | 0x03C => {
-                let i = (2 + (addr - 0x028) / 0x10) as usize;
-                self.bg[i].y.view_bits_mut::<Lsb0>()[0..=15].store(data);
+                let i = addr as usize / 0x10;
+                self.bg[i].y.view_bits_mut::<Lsb0>()[0..=7].store(data);
+                self.bg[i].cy = self.bg[i].y;
+            }
+            0x02D | 0x03D => {
+                let i = addr as usize / 0x10;
+                self.bg[i].y.view_bits_mut::<Lsb0>()[8..=15].store(data);
                 self.bg[i].cy = self.bg[i].y;
             }
             0x02E | 0x03E => {
-                let i = (2 + (addr - 0x028) / 0x10) as usize;
-                self.bg[i].y.view_bits_mut::<Lsb0>()[16..=27].store(data);
+                let i = addr as usize / 0x10;
+                self.bg[i].y.view_bits_mut::<Lsb0>()[16..=23].store(data);
+                self.bg[i].cy = self.bg[i].y;
+            }
+            0x02F | 0x03F => {
+                let i = addr as usize / 0x10;
+                self.bg[i].y.view_bits_mut::<Lsb0>()[24..=27].store(data);
                 self.bg[i].cy = self.bg[i].y;
             }
 
             // WINxH
-            0x040 | 0x042 => {
-                let i = ((addr - 0x040) / 2) as usize;
-                self.window[i].l = (data >> 8) as u8;
-                self.window[i].r = data as u8;
-            }
+            0x040 | 0x042 => self.window[(addr as usize - 0x40) / 2].r = data,
+            0x041 | 0x043 => self.window[(addr as usize - 0x40) / 2].l = data,
+
             // WINxV
-            0x044 | 0x046 => {
-                let i = ((addr - 0x044) / 2) as usize;
-                self.window[i].u = (data >> 8) as u8;
-                self.window[i].d = data as u8;
-            }
+            0x044 | 0x046 => self.window[(addr as usize - 0x44) / 2].d = data,
+            0x045 | 0x047 => self.window[(addr as usize - 0x44) / 2].u = data,
 
             // WININ / WINOUT
-            0x048 | 0x04A => {
+            0x048..=0x04B => {
+                let w = match addr {
+                    0x048 => &mut self.winin[0],
+                    0x049 => &mut self.winin[1],
+                    0x04A => &mut self.winout,
+                    0x04B => &mut self.objwin,
+                    _ => unreachable!(),
+                };
                 let v = data.view_bits::<Lsb0>();
-                for i in 0..2 {
-                    let ctrl = if addr == 0x048 {
-                        &mut self.winin[i]
-                    } else {
-                        if i == 0 {
-                            &mut self.winout
-                        } else {
-                            &mut self.objwin
-                        }
-                    };
 
-                    for j in 0..4 {
-                        ctrl.display_bg[j] = v[i * 8 + j];
-                    }
-                    ctrl.display_obj = v[i * 8 + 4];
-                    ctrl.color_special_effect = v[i * 8 + 5];
-                }
+                w.display_bg[0] = v[0];
+                w.display_bg[1] = v[1];
+                w.display_bg[2] = v[2];
+                w.display_bg[3] = v[3];
+                w.display_obj = v[4];
+                w.color_special_effect = v[5];
             }
 
             // MOSAIC
@@ -592,33 +603,32 @@ impl Lcd {
                 let v = data.view_bits::<Lsb0>();
                 self.bg_mosaic_h = v[0..=3].load();
                 self.bg_mosaic_v = v[4..=7].load();
-                self.obj_mosaic_h = v[8..=11].load();
-                self.obj_mosaic_v = v[12..=15].load();
             }
-            0x04E => {}
+            0x04D => {
+                let v = data.view_bits::<Lsb0>();
+                self.obj_mosaic_h = v[0..=3].load();
+                self.obj_mosaic_v = v[4..=7].load();
+            }
+            0x04E | 0x04F => {}
 
             // BLDCNT
             0x050 => {
                 let v = data.view_bits::<Lsb0>();
-                self.blend_ctrl.effect = v[6..=7].load();
                 self.blend_ctrl.target[0] = v[0..=5].load();
-                self.blend_ctrl.target[1] = v[8..=13].load();
+                self.blend_ctrl.effect = v[6..=7].load();
             }
+            0x051 => self.blend_ctrl.target[1] = data & 0x3F,
+
             // BLDALPHA
-            0x052 => {
-                let v = data.view_bits::<Lsb0>();
-                self.blend_ctrl.eva = v[0..=4].load();
-                self.blend_ctrl.evb = v[8..=12].load();
-            }
+            0x052 => self.blend_ctrl.eva = data & 0x1F,
+            0x053 => self.blend_ctrl.evb = data & 0x1F,
+
             // BLDY
-            0x054 => {
-                let v = data.view_bits::<Lsb0>();
-                self.blend_ctrl.evy = v[0..=4].load();
-            }
+            0x054 => self.blend_ctrl.evy = data & 0x1F,
 
-            0x056..=0x05E => {}
+            0x055..=0x05F => {}
 
-            _ => unreachable!("Invalid read from {addr:03X}"),
+            _ => unreachable!("Invalid write to {addr:03X} = 0x{data:02X}"),
         }
     }
 }
