@@ -1254,10 +1254,10 @@ impl Lcd {
 
         let y_in_win0 = self.display_window[0]
             && self.window[0].u as u32 <= self.y
-            && self.y <= self.window[0].d as u32;
+            && self.y < self.window[0].d as u32;
         let y_in_win1 = self.display_window[1]
             && self.window[1].u as u32 <= self.y
-            && self.y <= self.window[1].d as u32;
+            && self.y < self.window[1].d as u32;
 
         let winout_enable =
             self.display_window[0] || self.display_window[1] || self.display_obj_window;
@@ -1271,8 +1271,8 @@ impl Lcd {
         let global_effect = self.blend_ctrl.effect;
 
         for x in 0..SCREEN_WIDTH {
-            let in_win0 = y_in_win0 && self.window[0].l as u32 <= x && x <= self.window[0].r as u32;
-            let in_win1 = y_in_win1 && self.window[1].l as u32 <= x && x <= self.window[1].r as u32;
+            let in_win0 = y_in_win0 && self.window[0].l as u32 <= x && x < self.window[0].r as u32;
+            let in_win1 = y_in_win1 && self.window[1].l as u32 <= x && x < self.window[1].r as u32;
 
             let win_ctrl = if in_win0 {
                 &self.winin[0]
