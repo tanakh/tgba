@@ -4,6 +4,7 @@ use log::{trace, warn};
 use crate::{
     backup::eeprom::EepromSize,
     bus::Bus,
+    consts::{SCREEN_HEIGHT, SCREEN_WIDTH},
     context::{Interrupt, Lcd, Sound, SoundDma, Timing},
     interrupt::InterruptKind,
     util::{enum_pat, pack, trait_alias, ConstEval},
@@ -25,10 +26,6 @@ pub struct Dma {
     transfer_type: bool, // 0: 16bit, 1: 32bit
     game_pak_data_request_transfer: bool,
 
-    // 00: Start immediately
-    // 01: Start in a V-blank interval
-    // 10: Start in an H-blank interval
-    // 11: Special
     start_timing: u8,
     irq_enable: bool,
     dma_enable: bool,
@@ -41,6 +38,11 @@ pub struct Dma {
     prev_dma_frame: u64,
     prev_dma_line: u32,
 }
+
+// 00: Start immediately
+// 01: Start in a V-blank interval
+// 10: Start in an H-blank interval
+// 11: Special
 
 enum StartTiming {
     Immediately = 0,
@@ -87,12 +89,13 @@ impl Dma {
             enum_pat!(StartTiming::Immediately) => self.wait_for_exec,
             // Start in a V-blank interval
             enum_pat!(StartTiming::VBlank) => {
-                self.prev_dma_frame != ctx.lcd().frame() && ctx.lcd().vblank()
+                self.prev_dma_frame != ctx.lcd().frame() && ctx.lcd().line() >= SCREEN_HEIGHT
             }
             // Start in an H-blank interval
             enum_pat!(StartTiming::HBlank) => {
                 let lcd = ctx.lcd();
-                lcd.hblank()
+                lcd.x() >= SCREEN_WIDTH
+                    && lcd.line() < SCREEN_HEIGHT
                     && (self.prev_dma_frame, self.prev_dma_line) != (lcd.frame(), lcd.line())
             }
             enum_pat!(StartTiming::Special) => match self.ch {

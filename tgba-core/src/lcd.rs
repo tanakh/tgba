@@ -1,7 +1,7 @@
 use std::cmp::min;
 
 use bitvec::prelude::*;
-use log::{debug, info, trace};
+use log::{debug, trace};
 
 use crate::{
     consts::{CLOCK_PER_DOT, DOTS_PER_LINE, LINES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH},
@@ -237,6 +237,10 @@ impl Lcd {
         self.y
     }
 
+    pub fn x(&self) -> u32 {
+        self.x
+    }
+
     pub fn frame_buf(&self) -> &FrameBuf {
         &self.frame_buf
     }
@@ -311,20 +315,6 @@ impl Lcd {
         }
     }
 
-    pub fn vblank(&self) -> bool {
-        // set in line 160..226; not 227
-        SCREEN_HEIGHT <= self.y && self.y < 227
-    }
-
-    pub fn hblank(&self) -> bool {
-        // toggled in all lines, 0..227
-        self.x >= SCREEN_WIDTH
-    }
-
-    fn vcount_match(&self) -> bool {
-        self.y == self.vcount as u32
-    }
-
     pub fn read(&mut self, _ctx: &mut impl Context, addr: u32) -> u8 {
         match addr {
             // DISPCNT
@@ -349,9 +339,9 @@ impl Lcd {
 
             // DISPSTAT
             0x004 => pack! {
-                0 => self.vblank(),
-                1 => self.hblank(),
-                2 => self.vcount_match(),
+                0 => SCREEN_HEIGHT <= self.y && self.y < 227, // set in line 160..226; not 227
+                1 => self.x >= SCREEN_WIDTH, // toggled in all lines, 0..227
+                2 => self.y == self.vcount as u32,
                 3 => self.vblank_irq_enable,
                 4 => self.hblank_irq_enable,
                 5 => self.vcount_irq_enable,
@@ -628,7 +618,7 @@ impl Lcd {
 
             0x055..=0x05F => {}
 
-            _ => unreachable!("Invalid write to {addr:03X} = 0x{data:02X}"),
+            _ => unreachable!("0x{addr:03X}"),
         }
     }
 }
