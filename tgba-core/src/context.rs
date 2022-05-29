@@ -38,11 +38,8 @@ pub trait Sound {
     fn sound_tick(&mut self);
     fn sound_timer_overflow(&mut self, ch: u8);
 
-    fn sound_read8(&mut self, addr: u32) -> u8;
-    fn sound_read16(&mut self, addr: u32) -> u16;
-
-    fn sound_write8(&mut self, addr: u32, data: u8);
-    fn sound_write16(&mut self, addr: u32, data: u16);
+    fn sound_read(&mut self, addr: u32) -> u8;
+    fn sound_write(&mut self, addr: u32, data: u8);
 }
 
 #[delegatable_trait]
@@ -192,17 +189,11 @@ impl Sound for Inner2 {
         self.sound.timer_overflow(&mut self.inner, ch);
     }
 
-    fn sound_read8(&mut self, addr: u32) -> u8 {
-        self.sound.read8(&mut self.inner, addr)
+    fn sound_read(&mut self, addr: u32) -> u8 {
+        self.sound.read(&mut self.inner, addr)
     }
-    fn sound_read16(&mut self, addr: u32) -> u16 {
-        self.sound.read16(&mut self.inner, addr)
-    }
-    fn sound_write8(&mut self, addr: u32, data: u8) {
-        self.sound.write8(&mut self.inner, addr, data)
-    }
-    fn sound_write16(&mut self, addr: u32, data: u16) {
-        self.sound.write16(&mut self.inner, addr, data)
+    fn sound_write(&mut self, addr: u32, data: u8) {
+        self.sound.write(&mut self.inner, addr, data)
     }
 }
 

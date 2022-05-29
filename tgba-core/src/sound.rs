@@ -923,7 +923,7 @@ impl DirectSound {
 }
 
 impl Sound {
-    pub fn read8(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
+    pub fn read(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
         let data = match addr {
             0x060 => self.pulse[0].read(0),
             0x061 => 0,
@@ -1018,13 +1018,7 @@ impl Sound {
         data
     }
 
-    pub fn read16(&mut self, ctx: &mut impl Context, addr: u32) -> u16 {
-        let lo = self.read8(ctx, addr);
-        let hi = self.read8(ctx, addr + 1);
-        (hi as u16) << 8 | lo as u16
-    }
-
-    pub fn write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8) {
+    pub fn write(&mut self, ctx: &mut impl Context, addr: u32, data: u8) {
         match addr {
             0x060 => self.pulse[0].write(0, data),
             0x061 => {}
@@ -1128,10 +1122,5 @@ impl Sound {
 
             _ => unreachable!(),
         }
-    }
-
-    pub fn write16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
-        self.write8(ctx, addr, data as u8);
-        self.write8(ctx, addr + 1, (data >> 8) as u8);
     }
 }

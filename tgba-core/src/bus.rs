@@ -517,7 +517,7 @@ impl Bus {
                 ctx.elapse(self.wait_cycles.gamepak_ram_8);
                 self.backup.write_ram(addr & 0xFFFF, data);
             }
-            _ => panic!(),
+            _ => panic!("Write8: 0x{addr:08X} = 0x{data:02X}"),
         }
     }
 
@@ -578,7 +578,7 @@ impl Bus {
                 self.backup
                     .write_ram((addr + 1) & 0xFFFF, (data >> 8) as u8);
             }
-            _ => panic!(),
+            _ => panic!("Write16: 0x{addr:08X} = 0x{data:04X}"),
         }
     }
 
@@ -649,7 +649,7 @@ impl Bus {
     pub fn io_read8(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
         match addr {
             0x000..=0x05E => ctx.lcd_read(addr),
-            0x060..=0x0AF => ctx.sound_read8(addr),
+            0x060..=0x0AF => ctx.sound_read(addr),
 
             _ => {
                 let data = self.io_read16(ctx, addr & !1);
@@ -665,7 +665,11 @@ impl Bus {
                 let hi = ctx.lcd_read(addr + 1);
                 (hi as u16) << 8 | lo as u16
             }
-            0x060..=0x0AE => ctx.sound_read16(addr),
+            0x060..=0x0AE => {
+                let lo = ctx.sound_read(addr);
+                let hi = ctx.sound_read(addr + 1);
+                (hi as u16) << 8 | lo as u16
+            }
             0x0B0..=0x0DE => self.read_dma16(addr),
             0x0E0..=0x0FE => 0,
             0x100..=0x10E => self.timers.read16(addr),
@@ -733,7 +737,7 @@ impl Bus {
     pub fn io_write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8) {
         match addr {
             0x000..=0x05F => ctx.lcd_write(addr, data),
-            0x060..=0x0AF => ctx.sound_write8(addr, data),
+            0x060..=0x0AF => ctx.sound_write(addr, data),
 
             // SIODATA
             0x120..=0x127 => {
@@ -774,7 +778,7 @@ impl Bus {
                     ctx.interrupt_mut().set_halt(true);
                 } else if data == 0x80 {
                     // FIXME
-                    panic!("Enter stop mode");
+                    todo!("Enter stop mode");
                     // ctx.interrupt_mut().set_stop(true);
                 }
             }
@@ -806,7 +810,10 @@ impl Bus {
                 ctx.lcd_write(addr, data as u8);
                 ctx.lcd_write(addr + 1, (data >> 8) as u8);
             }
-            0x060..=0x0AE => ctx.sound_write16(addr, data),
+            0x060..=0x0AE => {
+                ctx.sound_write(addr, data as u8);
+                ctx.sound_write(addr + 1, (data >> 8) as u8);
+            }
             0x0B0..=0x0DE => self.write_dma16(ctx, addr, data),
             0x0E0..=0x0FE => {}
             0x100..=0x10E => self.timers.write16(addr, data),
