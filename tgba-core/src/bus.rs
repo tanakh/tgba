@@ -275,7 +275,7 @@ impl Bus {
             }
 
             _ => {
-                warn!("Invalid Read8: 0x{addr:08X}");
+                warn!("Read8: Bad segment: 0x{addr:08X}");
                 0
             }
         }
@@ -333,7 +333,7 @@ impl Bus {
             }
 
             _ => {
-                warn!("Invalid Read16: 0x{addr:08X}");
+                warn!("Read16: Bad segment: 0x{addr:08X}");
                 0
             }
         }
@@ -397,7 +397,7 @@ impl Bus {
                 (lo as u32) << 24 | (lo as u32) << 16 | (lo as u32) << 8 | lo as u32
             }
             _ => {
-                warn!("Invalid Read32: 0x{addr:08X}");
+                warn!("Read32: Bad segment: 0x{addr:08X}");
                 0
             }
         }
@@ -517,7 +517,7 @@ impl Bus {
                 ctx.elapse(self.wait_cycles.gamepak_ram_8);
                 self.backup.write_ram(addr & 0xFFFF, data);
             }
-            _ => panic!("Write8: 0x{addr:08X} = 0x{data:02X}"),
+            _ => warn!("Write8: Bad segment: 0x{addr:08X} = 0x{data:02X}"),
         }
     }
 
@@ -578,7 +578,7 @@ impl Bus {
                 self.backup
                     .write_ram((addr + 1) & 0xFFFF, (data >> 8) as u8);
             }
-            _ => panic!("Write16: 0x{addr:08X} = 0x{data:04X}"),
+            _ => warn!("Write16: Bad segment: 0x{addr:08X} = 0x{data:04X}"),
         }
     }
 
@@ -632,7 +632,7 @@ impl Bus {
                 self.backup
                     .write_ram((addr + 3) & 0xFFFF, (data >> 24) as u8);
             }
-            _ => panic!("Write32: 0x{addr:08X} = 0x{data:08X}"),
+            _ => warn!("Write32: Bad segment: 0x{addr:08X} = 0x{data:08X}"),
         }
     }
 }
