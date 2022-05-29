@@ -120,15 +120,15 @@ impl Default for LineBuf {
 }
 
 impl LineBuf {
-    fn clear(&mut self, backdrop: u16) {
+    fn clear(&mut self) {
         self.obj_attr.fill(ObjAttr::default());
         self.obj.fill(0x8000);
         for i in 0..4 {
             self.bg[i].fill(0x8000);
         }
         for i in 0..2 {
-            self.surface[i].fill(backdrop);
-            self.surface_attr[i].fill(SurfaceAttr::new(4, 5, 0));
+            self.surface[i].fill(0x8000);
+            self.surface_attr[i].fill(SurfaceAttr::new(5, 6, 0));
         }
     }
 }
@@ -634,7 +634,7 @@ impl Lcd {
             return;
         }
 
-        self.line_buf.clear(self.bg_palette256(0));
+        self.line_buf.clear();
 
         trace!("Render line: y = {}, mode = {}", self.y, self.bg_mode);
 
@@ -1269,6 +1269,7 @@ impl Lcd {
         };
 
         let global_effect = self.blend_ctrl.effect;
+        let backdrop = self.bg_palette256(0);
 
         for x in 0..SCREEN_WIDTH {
             let in_win0 = y_in_win0 && self.window[0].l as u32 <= x && x < self.window[0].r as u32;
@@ -1288,6 +1289,14 @@ impl Lcd {
             .clone();
 
             let x = x as usize;
+
+            let effect = if !win_ctrl.color_special_effect {
+                0
+            } else {
+                global_effect
+            };
+
+            self.put_surface_pixel(x, backdrop, SurfaceAttr::new(4, 5, effect));
 
             if self.display_obj && win_ctrl.display_obj {
                 let col = self.line_buf.obj[x];
@@ -1314,11 +1323,6 @@ impl Lcd {
 
                 let col = self.line_buf.bg[i][x];
                 if col & 0x8000 == 0 {
-                    let effect = if !win_ctrl.color_special_effect {
-                        0
-                    } else {
-                        global_effect
-                    };
                     self.put_surface_pixel(
                         x,
                         col,
@@ -1347,9 +1351,9 @@ impl Lcd {
 
         let target0 = self.blend_ctrl.target[0];
         let target1 = self.blend_ctrl.target[1];
-        let eva = self.blend_ctrl.eva;
-        let evb = self.blend_ctrl.evb;
-        let evy = self.blend_ctrl.evy;
+        let eva = self.blend_ctrl.eva.min(16);
+        let evb = self.blend_ctrl.evb.min(16);
+        let evy = self.blend_ctrl.evy.min(16);
 
         for x in 0..SCREEN_WIDTH {
             let x = x as usize;
