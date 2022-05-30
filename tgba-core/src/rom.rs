@@ -61,6 +61,6 @@ impl Rom {
     }
 
     pub fn backup_type(&self) -> &'static str {
-        Backup::detect_backup(&self.data).backup_type()
+        Backup::detect_backup(&self.data, None).backup_type()
     }
 }

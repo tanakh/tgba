@@ -1,12 +1,28 @@
+use log::error;
+
 pub struct Sram {
     data: Vec<u8>,
 }
 
 impl Sram {
-    pub fn new() -> Self {
+    pub fn new(backup: Option<Vec<u8>>) -> Self {
         Self {
-            data: vec![0; 0x10000],
+            data: backup.map_or_else(
+                || vec![0; 0x10000],
+                |data| {
+                    if data.len() != 0x10000 {
+                        error!("Invalid backup size: {:?}, expect 64KB", data.len());
+                        vec![0; 0x10000]
+                    } else {
+                        data
+                    }
+                },
+            ),
         }
+    }
+
+    pub fn data(&self) -> Vec<u8> {
+        self.data.clone()
     }
 
     pub fn read(&self, addr: u32) -> u8 {

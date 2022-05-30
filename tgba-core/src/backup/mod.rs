@@ -4,7 +4,7 @@ pub mod sram;
 
 use eeprom::Eeprom;
 use flash::Flash;
-use log::warn;
+use log::{error, warn};
 
 use self::{eeprom::EepromSize, sram::Sram};
 
@@ -21,28 +21,42 @@ pub enum Backup {
 }
 
 impl Backup {
-    pub fn detect_backup(data: &[u8]) -> Backup {
+    pub fn detect_backup(data: &[u8], backup: Option<Vec<u8>>) -> Backup {
         for i in 0..data.len() {
             if match_id_string(&data[i..], b"EEPROM_Vnnn") {
-                return Backup::Eeprom(Default::default());
+                return Backup::Eeprom(Eeprom::new(backup));
             }
             if match_id_string(&data[i..], b"SRAM_Vnnn")
                 || match_id_string(&data[i..], b"SRAM_F_Vnnn")
             {
-                return Backup::Sram(Sram::new());
+                return Backup::Sram(Sram::new(backup));
             }
             if match_id_string(&data[i..], b"FLASH_Vnnn")
                 || match_id_string(&data[i..], b"FLASH512_Vnnn")
             {
                 // 512Kbit (= 64KB) Flash
-                return Backup::Flash(Flash::new(64 * 1024));
+                return Backup::Flash(Flash::new(64 * 1024, backup));
             }
             if match_id_string(&data[i..], b"FLASH1M_Vnnn") {
                 // 1Mbit (= 128KB) Flash
-                return Backup::Flash(Flash::new(128 * 1024));
+                return Backup::Flash(Flash::new(128 * 1024, backup));
             }
         }
+        if data.is_empty() {
+            warn!("Unknown backup type");
+        } else {
+            error!("Unknown backup type but backup data is given");
+        }
         Backup::Unknown
+    }
+
+    pub fn data(&self) -> Option<Vec<u8>> {
+        match self {
+            Backup::Eeprom(e) => Some(e.data()),
+            Backup::Sram(s) => Some(s.data()),
+            Backup::Flash(f) => Some(f.data()),
+            Backup::Unknown => None,
+        }
     }
 
     pub fn backup_type(&self) -> &'static str {

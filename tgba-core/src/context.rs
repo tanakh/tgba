@@ -72,9 +72,9 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(bios: Vec<u8>, rom: rom::Rom) -> Self {
+    pub fn new(bios: Vec<u8>, rom: rom::Rom, backup: Option<Vec<u8>>) -> Self {
         let cpu = cpu::Cpu::new();
-        let bus = bus::Bus::new(bios, rom);
+        let bus = bus::Bus::new(bios, rom, backup);
         let lcd = lcd::Lcd::new();
         let sound = sound::Sound::new();
         let interrupt = interrupt::Interrupt::new();

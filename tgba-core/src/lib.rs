@@ -28,9 +28,9 @@ pub struct Agb {
 }
 
 impl Agb {
-    pub fn new(bios: Vec<u8>, rom: Rom) -> Self {
+    pub fn new(bios: Vec<u8>, rom: Rom, backup: Option<Vec<u8>>) -> Self {
         Agb {
-            ctx: Context::new(bios, rom),
+            ctx: Context::new(bios, rom, backup),
         }
     }
 
@@ -61,5 +61,10 @@ impl Agb {
     pub fn set_key_input(&mut self, key_input: &KeyInput) {
         use context::Bus;
         self.ctx.set_key_input(key_input);
+    }
+
+    pub fn backup(&self) -> Option<Vec<u8>> {
+        use context::Bus;
+        self.ctx.bus().backup().data()
     }
 }

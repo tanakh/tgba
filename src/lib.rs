@@ -18,7 +18,7 @@ use sdl2::{
 use std::{
     fs::{read, File},
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 use tempfile::NamedTempFile;
@@ -29,15 +29,16 @@ const SCREEN_WIDTH: u32 = 240;
 const SCREEN_HEIGHT: u32 = 160;
 const SCALING: u32 = 4;
 
-pub fn run(bios: &Path, rom: &Path) -> Result<()> {
+pub fn run(bios: &Path, rom_path: &Path) -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
 
     let bios = read(&bios)?;
-    let rom = load_rom(&rom)?;
+    let rom = load_rom(&rom_path)?;
+    let backup = load_backup(&rom_path)?;
 
     dump_rom_info(&rom);
 
-    let mut agb = Agb::new(bios, rom);
+    let mut agb = Agb::new(bios, rom, backup);
 
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
@@ -79,19 +80,14 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
 
     let game_controller = game_controller_subsystem.open(0).ok();
 
+    let mut frames = 0;
+
     while process_events(&mut event_pump) {
         let start_time = std::time::Instant::now();
 
         let key_input = get_key_input(&event_pump, &game_controller);
-        // eprintln!("Key input: {key_input:?}");
-
-        // if event_pump
-        //     .keyboard_state()
-        //     .is_scancode_pressed(Scancode::Space)
-        // {
         agb.set_key_input(&key_input);
         agb.run_frame();
-        // }
 
         let frame_buf = agb.frame_buf();
 
@@ -119,6 +115,7 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
         //     audio_buf.len()
         // );
 
+        // Sync by audio
         while audio_queue.size() > SOUND_BUF_LEN as u32 * 4 {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -138,6 +135,18 @@ pub fn run(bios: &Path, rom: &Path) -> Result<()> {
         // if wait > elapsed {
         //     std::thread::sleep(wait - elapsed);
         // }
+
+        frames += 1;
+
+        if frames % 600 == 0 {
+            if let Some(backup) = agb.backup() {
+                save_backup(&rom_path, backup)?;
+            }
+        }
+    }
+
+    if let Some(backup) = agb.backup() {
+        save_backup(&rom_path, backup)?;
     }
 
     Ok(())
@@ -219,6 +228,44 @@ fn load_rom(file: &Path) -> Result<Rom> {
         }
         _ => bail!("Unsupported file extension"),
     }
+}
+
+fn backup_dir() -> Result<PathBuf> {
+    let data_dir = dirs::data_dir()
+        .ok_or_else(|| anyhow!("Could not find data directory"))?
+        .join("tgba");
+
+    if data_dir.exists() {
+        if !data_dir.is_dir() {
+            bail!("Data directory is not a directory");
+        }
+    } else {
+        std::fs::create_dir_all(&data_dir)?;
+    }
+
+    Ok(data_dir)
+}
+
+fn load_backup(rom_path: &Path) -> Result<Option<Vec<u8>>> {
+    let backup_dir = backup_dir()?;
+    let backup_path = backup_dir.join(rom_path.with_extension("sav").file_name().unwrap());
+
+    if backup_path.exists() {
+        info!("Loading backup from: `{}`", backup_path.display());
+        let ret = std::fs::read(backup_path)?;
+        Ok(Some(ret))
+    } else {
+        Ok(None)
+    }
+}
+
+fn save_backup(rom_path: &Path, backup: Vec<u8>) -> Result<()> {
+    let backup_dir = backup_dir()?;
+    let backup_path = backup_dir.join(rom_path.with_extension("sav").file_name().unwrap());
+
+    info!("Saving backup to: `{}`", backup_path.display());
+    std::fs::write(backup_path, backup)?;
+    Ok(())
 }
 
 fn dump_rom_info(rom: &Rom) {

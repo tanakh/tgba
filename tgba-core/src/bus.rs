@@ -20,7 +20,7 @@ trait_alias!(pub trait Context = Lcd + Sound + Timing + SoundDma + Interrupt);
 
 pub struct Bus {
     bios: Vec<u8>,
-    pub ram: Vec<u8>, // FIXME: remove pub
+    ram: Vec<u8>,
     ext_ram: Vec<u8>,
     rom: Rom,
     backup: Backup,
@@ -125,10 +125,10 @@ impl WaitCycles {
 }
 
 impl Bus {
-    pub fn new(bios: Vec<u8>, rom: Rom) -> Self {
+    pub fn new(bios: Vec<u8>, rom: Rom, backup: Option<Vec<u8>>) -> Self {
         let ram = vec![0; 0x8000];
         let ext_ram = vec![0; 0x40000];
-        let backup = Backup::detect_backup(&rom.data);
+        let backup = Backup::detect_backup(&rom.data, backup);
 
         let game_pak_ram_wait_ctrl = 0;
         let game_pak_wait_ctrl = [0; 3];

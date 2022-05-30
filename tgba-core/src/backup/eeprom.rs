@@ -1,4 +1,4 @@
-use log::{info, trace, warn};
+use log::{error, info, trace, warn};
 
 pub struct Eeprom {
     data: Vec<u64>,
@@ -18,20 +18,34 @@ pub enum EepromState {
     Writing { addr: u32, pos: u32, buf: u64 },
 }
 
-impl Default for Eeprom {
-    fn default() -> Self {
+impl Eeprom {
+    pub fn new(backup: Option<Vec<u8>>) -> Self {
         Self {
-            data: vec![],
+            data: backup.map_or_else(
+                || vec![],
+                |data| {
+                    let data = data
+                        .chunks(8)
+                        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                        .collect::<Vec<u64>>();
+                    if matches!(data.len() * 8, 512 | 8192) {
+                        error!(
+                            "Invalid backup size: {:?}, expect 512bits or 8kbits",
+                            data.len()
+                        );
+                    }
+                    data
+                },
+            ),
             state: EepromState::WaitForCommand { step: 0 },
         }
     }
-}
 
-impl Eeprom {
     pub fn size(&self) -> Option<EepromSize> {
-        if self.data.len() == 512 / 8 {
+        let bits = self.data.len() * 8;
+        if bits == 512 {
             Some(EepromSize::Size512)
-        } else if self.data.len() == 8 * 1024 / 8 {
+        } else if bits == 8192 {
             Some(EepromSize::Size8K)
         } else {
             None
@@ -49,6 +63,13 @@ impl Eeprom {
                 self.data.resize(8 * 1024 / 8, 0);
             }
         }
+    }
+
+    pub fn data(&self) -> Vec<u8> {
+        self.data
+            .iter()
+            .flat_map(|x| x.to_le_bytes().to_vec())
+            .collect()
     }
 
     fn addr_len(&self) -> u32 {

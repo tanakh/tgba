@@ -1,4 +1,4 @@
-use log::{info, warn};
+use log::{error, info, warn};
 
 pub struct Flash {
     state: State,
@@ -27,12 +27,27 @@ enum ReadMode {
 }
 
 impl Flash {
-    pub fn new(size: usize) -> Self {
+    pub fn new(size: usize, backup: Option<Vec<u8>>) -> Self {
+        let data = if let Some(backup) = backup {
+            if backup.len() != size {
+                error!(
+                    "Invalid backup size: {:?}, expect {} bytes",
+                    backup.len(),
+                    size
+                );
+                vec![0xFF; size]
+            } else {
+                backup
+            }
+        } else {
+            vec![0xFF; size]
+        };
+
         Self {
             state: State::WaitForCommand(0, CommandContext::None),
             read_mode: ReadMode::Data,
             bank: 0,
-            data: vec![0xFF; size as usize],
+            data,
         }
     }
 
@@ -44,6 +59,10 @@ impl Flash {
         } else {
             unreachable!()
         }
+    }
+
+    pub fn data(&self) -> Vec<u8> {
+        self.data.clone()
     }
 
     pub fn read(&mut self, addr: u32) -> u8 {
