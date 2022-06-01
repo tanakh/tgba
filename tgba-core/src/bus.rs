@@ -51,6 +51,8 @@ pub struct Bus {
 
     post_boot: u8,
 
+    bios_protect: bool,
+
     prefetch_base: u32,
     prefetched_size: u32,
     prefetch_start_time: u64,
@@ -169,12 +171,18 @@ impl Bus {
 
             post_boot: 0,
 
+            bios_protect: false,
+
             prefetch_base: 0,
             prefetch_start_time: 0,
             prefetched_size: 0,
 
             wait_cycles,
         }
+    }
+
+    pub fn set_pc(&mut self, pc: u32) {
+        self.bios_protect = !matches!(pc >> 24, 0 | 1);
     }
 
     pub fn set_key_input(&mut self, ctx: &mut impl Context, key_input: &KeyInput) {
@@ -236,10 +244,14 @@ impl Bus {
         match addr >> 24 {
             0x0..=0x1 => {
                 ctx.elapse(1);
-                if addr < 0x00004000 {
-                    self.bios[addr as usize]
+                if !self.bios_protect {
+                    if addr < 0x00004000 {
+                        self.bios[addr as usize]
+                    } else {
+                        warn!("Invalid BIOS address read: 0x{addr:08X}:8");
+                        0
+                    }
                 } else {
-                    warn!("Invalid BIOS address read: 0x{addr:08X}:8");
                     0
                 }
             }
@@ -294,11 +306,15 @@ impl Bus {
 
         match addr >> 24 {
             0x0..=0x1 => {
-                if addr < 0x00004000 {
-                    ctx.elapse(1);
-                    read16(&self.bios, (addr & !1) as usize)
+                if !self.bios_protect {
+                    if addr < 0x00004000 {
+                        ctx.elapse(1);
+                        read16(&self.bios, (addr & !1) as usize)
+                    } else {
+                        warn!("Invalid BIOS address read: 0x{addr:08X}:16");
+                        0
+                    }
                 } else {
-                    warn!("Invalid BIOS address read: 0x{addr:08X}:16");
                     0
                 }
             }
@@ -352,11 +368,15 @@ impl Bus {
 
         match addr >> 24 {
             0x0..=0x1 => {
-                if addr < 0x00004000 {
-                    ctx.elapse(1);
-                    read32(&self.bios, (addr & !3) as usize)
+                if !self.bios_protect {
+                    if addr < 0x00004000 {
+                        ctx.elapse(1);
+                        read32(&self.bios, (addr & !3) as usize)
+                    } else {
+                        warn!("Invalid BIOS address read: 0x{addr:08X}:32");
+                        0
+                    }
                 } else {
-                    warn!("Invalid BIOS address read: 0x{addr:08X}:32");
                     0
                 }
             }
@@ -557,6 +577,10 @@ impl Bus {
                 write16(&mut ctx.lcd_mut().palette, (addr & 0x3FE) as usize, data);
             }
             0x6 => {
+                if addr == 0x06001600 {
+                    debug!("{addr:08X} = {data:04X}");
+                }
+
                 ctx.elapse(1);
                 write16(&mut ctx.lcd_mut().vram, vram_addr(addr & !1), data);
             }

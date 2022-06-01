@@ -308,6 +308,8 @@ impl<C: Context> Cpu<C> {
             let _ = ctx.read16(pc, true);
             let _ = ctx.read16(pc, false);
         }
+        ctx.bus_mut().set_pc(pc);
+
         self.fetch_first = false;
     }
 
@@ -324,7 +326,7 @@ impl<C: Context> Cpu<C> {
 
         if !self.regs.fiq_disable && ctx.interrupt().fiq() {
             ctx.interrupt_mut().set_halt(false);
-            self.exception(Exception::FIQ);
+            self.exception(ctx, Exception::FIQ);
             // FIXME
             ctx.elapse(28);
             return;
@@ -332,7 +334,7 @@ impl<C: Context> Cpu<C> {
 
         if !self.regs.irq_disable && ctx.interrupt().irq() {
             ctx.interrupt_mut().set_halt(false);
-            self.exception(Exception::IRQ);
+            self.exception(ctx, Exception::IRQ);
             // FIXME: correct time
             ctx.elapse(28);
             return;
@@ -350,7 +352,7 @@ impl<C: Context> Cpu<C> {
         }
     }
 
-    fn exception(&mut self, e: Exception) {
+    fn exception(&mut self, ctx: &mut C, e: Exception) {
         debug!("Exception: {e:?}");
 
         let old_cpsr = self.regs.cpsr();
@@ -375,12 +377,10 @@ impl<C: Context> Cpu<C> {
         self.regs.change_mode(e.mode_on_entry());
         self.regs.spsr = old_cpsr;
         self.regs.r[14] = old_pc;
-        self.regs.r[15] = e.vector_addr();
+        self.set_pc(ctx, e.vector_addr());
         self.regs.state = false;
         self.regs.irq_disable = true;
         self.regs.fiq_disable = true;
-        self.pc_changed = true;
-        self.fetch_first = true;
     }
 
     fn exec_arm(&mut self, ctx: &mut C) {
@@ -2248,7 +2248,7 @@ fn arm_disasm_swp(instr: u32, _pc: u32) -> String {
 fn arm_op_swi<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u32) {
     trace!("Cycle: {}", ctx.now());
     trace_swi(cpu, (instr >> 16) as u8, cpu.regs.r[15].wrapping_sub(8));
-    cpu.exception(Exception::SoftwareInterrupt)
+    cpu.exception(ctx, Exception::SoftwareInterrupt)
 }
 
 fn arm_disasm_swi(instr: u32, _pc: u32) -> String {
@@ -2952,7 +2952,7 @@ fn thumb_disasm_cond_branch(instr: u16, pc: u32) -> String {
 fn thumb_op_swi<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u16) {
     trace!("Cycle: {}", ctx.now());
     trace_swi(cpu, instr as u8, cpu.regs.r[15].wrapping_sub(2));
-    cpu.exception(Exception::SoftwareInterrupt);
+    cpu.exception(ctx, Exception::SoftwareInterrupt);
 }
 
 fn thumb_disasm_swi(instr: u16, _pc: u32) -> String {
