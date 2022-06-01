@@ -1316,10 +1316,9 @@ impl Lcd {
                 if col & 0x8000 == 0 {
                     let effect = if !win_ctrl.color_special_effect {
                         0
-                    } else if self.line_buf.obj_attr[x].semi_transparent() {
-                        1
                     } else {
-                        global_effect
+                        let obj_trans = self.line_buf.obj_attr[x].semi_transparent();
+                        global_effect | if obj_trans { 4 } else { 0 }
                     };
                     self.put_surface_pixel(
                         x,
@@ -1376,13 +1375,15 @@ impl Lcd {
             let a0 = &self.line_buf.surface_attr[0][x];
             let a1 = &self.line_buf.surface_attr[1][x];
 
-            let col = match a0.effect() {
-                1 if target0 & (1 << a0.kind()) != 0 && target1 & (1 << a1.kind()) != 0 => {
+            let eff = a0.effect();
+
+            let col = match (eff & 4, eff & 3) {
+                (4, _) if target1 & (1 << a1.kind()) != 0 => alpha_blend(c0, eva, c1, evb),
+                (_, 1) if target0 & (1 << a0.kind()) != 0 && target1 & (1 << a1.kind()) != 0 => {
                     alpha_blend(c0, eva, c1, evb)
                 }
-                2 if target0 & (1 << a0.kind()) != 0 => brightness_increase(c0, evy),
-                3 if target0 & (1 << a0.kind()) != 0 => brightness_decrease(c0, evy),
-                // 4 if a0.kind() == 4 => alpha_blend(c0, eva, c1, evb),
+                (_, 2) if target0 & (1 << a0.kind()) != 0 => brightness_increase(c0, evy),
+                (_, 3) if target0 & (1 << a0.kind()) != 0 => brightness_decrease(c0, evy),
                 _ => c0,
             };
 
