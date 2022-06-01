@@ -1,6 +1,9 @@
 use log::error;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct Sram {
+    #[serde(with = "serde_bytes")]
     data: Vec<u8>,
 }
 

@@ -5,9 +5,11 @@ pub mod sram;
 use eeprom::Eeprom;
 use flash::Flash;
 use log::{error, warn};
+use serde::{Deserialize, Serialize};
 
 use self::{eeprom::EepromSize, sram::Sram};
 
+#[derive(Serialize, Deserialize)]
 pub enum Backup {
     // EEPROM_Vnnn    EEPROM 512 bytes or 8 Kbytes (4Kbit or 64Kbit)
     Eeprom(Eeprom),

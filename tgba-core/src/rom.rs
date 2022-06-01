@@ -1,8 +1,9 @@
 use anyhow::{bail, Result};
-use log::warn;
+use log::error;
 
 use crate::backup::Backup;
 
+#[derive(Default)]
 pub struct Rom {
     pub data: Vec<u8>,
     pub title: Vec<u8>,
@@ -34,7 +35,7 @@ impl Rom {
 
         for i in (0x15..=0x1B).chain(0x1E..=0x1F) {
             if header[i] != 0 {
-                warn!("Non-zero reserved area: {:02X}", header[i]);
+                error!("Non-zero value in reserved area: {:02X}", header[i]);
             }
         }
 
@@ -44,7 +45,7 @@ impl Rom {
             .wrapping_add(0x19);
 
         if sum.wrapping_add(complement_check) != 0 {
-            warn!("Invalid complement check: {sum:02X} + {complement_check:02X} != 0");
+            error!("Invalid complement check: {sum:02X} + {complement_check:02X} != 0");
         }
 
         let ret = Rom {

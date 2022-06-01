@@ -1,5 +1,6 @@
 use bitvec::prelude::*;
-use log::{trace, warn};
+use log::{log_enabled, trace, warn};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     backup::eeprom::EepromSize,
@@ -12,7 +13,7 @@ use crate::{
 
 trait_alias!(pub trait Context = Lcd + Sound + SoundDma + Interrupt + Timing);
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Dma {
     ch: usize,
 
@@ -191,6 +192,10 @@ impl Bus {
 
         if !self.dma_mut(ch).check_dma_start(ctx) {
             return;
+        }
+
+        if log_enabled!(log::Level::Trace) {
+            self.dma(ch).trace(ctx, &[]);
         }
 
         // The CPU is paused when DMA transfers are active, however, the CPU is operating during the periods when Sound/Blanking DMA transfers are paused.

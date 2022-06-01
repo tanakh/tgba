@@ -2,6 +2,7 @@ use std::cmp::min;
 
 use bitvec::prelude::*;
 use log::{debug, trace};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     consts::{CLOCK_PER_DOT, DOTS_PER_LINE, LINES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH},
@@ -13,10 +14,13 @@ use crate::{
 
 trait_alias!(pub trait Context = Timing + Interrupt);
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct Lcd {
+    #[serde(with = "serde_bytes")]
     pub vram: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub oam: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub palette: Vec<u8>,
 
     bg_mode: u8,
@@ -53,8 +57,10 @@ pub struct Lcd {
     y: u32,
     frame: u64,
 
+    #[serde(skip)]
     line_buf: LineBuf,
-    frame_buf: FrameBuf,
+    #[serde(skip)]
+    pub frame_buf: FrameBuf,
 }
 
 struct LineBuf {
@@ -133,7 +139,7 @@ impl LineBuf {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct Bg {
     priority: u8,
     char_base_block: u8,
@@ -164,7 +170,7 @@ impl Bg {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct Window {
     l: u8,
     r: u8,
@@ -172,14 +178,14 @@ struct Window {
     d: u8,
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
 struct WindowCtrl {
     display_bg: [bool; 4],
     display_obj: bool,
     color_special_effect: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct BlendCtrl {
     // 0b00: No special effects
     // 0b01: Alpha blending
@@ -760,6 +766,11 @@ impl Lcd {
                 }
             } else {
                 // 256 x 1 color mode
+
+                let char = char & 0x1FF;
+
+                assert!(char_base_addr + char * 64 + oy * 8 + ox < self.vram.len(), "too large index: char_base: {char_base_addr:08X}, char: 0x{char:03X}, ox: {ox}, oy: {oy}, b0: 0x{b0:02X}, b1: 0x{b1:02X}");
+
                 let col = self.vram[char_base_addr + char * 64 + oy * 8 + ox];
                 if col != 0 {
                     self.line_buf.bg[i][x as usize] = self.bg_palette256(col as _);
@@ -1176,7 +1187,9 @@ impl Lcd {
         } else {
             char_name + (y / 8) * (w / 8) + x / 8
         };
+        let tile_num = tile_num % 1024;
         let addr = tile_num * 32 + (y % 8) * 4 + x % 8 / 2;
+
         (self.vram[(OBJ_BASE_ADDR + addr) as usize] >> (x % 2 * 4)) & 0xf
     }
 

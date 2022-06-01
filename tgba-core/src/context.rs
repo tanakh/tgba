@@ -1,5 +1,6 @@
 use crate::{bus, cpu, interrupt, lcd, rom, sound, KeyInput};
 use ambassador::{delegatable_trait, Delegate};
+use serde::{Deserialize, Serialize};
 
 #[delegatable_trait]
 pub trait Bus {
@@ -60,7 +61,7 @@ pub trait Timing {
     fn elapse(&mut self, elapse: u64);
 }
 
-#[derive(Delegate)]
+#[derive(Delegate, Serialize, Deserialize)]
 #[delegate(Bus, target = "inner")]
 #[delegate(Lcd, target = "inner")]
 #[delegate(Sound, target = "inner")]
@@ -97,7 +98,7 @@ impl Context {
     }
 }
 
-#[derive(Delegate)]
+#[derive(Delegate, Serialize, Deserialize)]
 #[delegate(Lcd, target = "inner")]
 #[delegate(Sound, target = "inner")]
 #[delegate(Interrupt, target = "inner")]
@@ -105,6 +106,13 @@ impl Context {
 pub struct Inner {
     pub bus: bus::Bus,
     pub inner: Inner2,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        // Dummy implementation for CPU serde
+        unreachable!()
+    }
 }
 
 impl Bus for Inner {
@@ -144,7 +152,7 @@ impl Bus for Inner {
     }
 }
 
-#[derive(Delegate)]
+#[derive(Delegate, Serialize, Deserialize)]
 #[delegate(Interrupt, target = "inner")]
 #[delegate(SoundDma, target = "inner")]
 #[delegate(Timing, target = "inner")]
@@ -197,6 +205,7 @@ impl Sound for Inner2 {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Inner3 {
     interrupt: interrupt::Interrupt,
     sound_dma_request: [bool; 2],

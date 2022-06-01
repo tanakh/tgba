@@ -1,4 +1,5 @@
 use bitvec::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     context::{Interrupt, Sound, Timing},
@@ -8,7 +9,7 @@ use crate::{
 
 trait_alias!(pub trait Context = Timing + Interrupt + Sound);
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct Timers {
     timer: [Timer; 4],
     prev_cycle: u64,
@@ -75,7 +76,7 @@ impl Timers {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct Timer {
     enable: bool,
     counter: u16,

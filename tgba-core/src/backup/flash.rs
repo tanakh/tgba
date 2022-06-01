@@ -1,26 +1,29 @@
-use log::{error, info, warn};
+use log::{debug, error, trace, warn};
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct Flash {
     state: State,
     read_mode: ReadMode,
     bank: u32,
+    #[serde(with = "serde_bytes")]
     data: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 enum State {
     WaitForCommand(usize, CommandContext),
     WriteSingleByte,
     BankChange,
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 enum CommandContext {
     None,
     Erase,
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 enum ReadMode {
     Data,
     ChipId,
@@ -100,7 +103,7 @@ impl Flash {
     pub fn write(&mut self, addr: u32, data: u8) {
         let addr = addr & 0xFFFF;
 
-        info!("Write Flash: 0x{addr:04X} = 0x{data:02X}");
+        trace!("Write Flash: 0x{addr:04X} = 0x{data:02X}");
 
         match &mut self.state {
             State::WaitForCommand(step, ctx) => match (*step, addr, data) {
@@ -108,12 +111,12 @@ impl Flash {
                 (1, 0x2AAA, 0x55) => *step = 2,
 
                 (2, 0x5555, 0x90) if *ctx == CommandContext::None => {
-                    info!("FLASH: enter ID mode");
+                    debug!("FLASH: enter ID mode");
                     self.read_mode = ReadMode::ChipId;
                     self.state = State::WaitForCommand(0, CommandContext::None);
                 }
                 (2, 0x5555, 0xF0) if *ctx == CommandContext::None => {
-                    info!("FLASH: terminate ID mode");
+                    debug!("FLASH: terminate ID mode");
                     if self.read_mode != ReadMode::ChipId {
                         panic!("FLASH: leave ID mode without entering");
                     }
@@ -122,28 +125,28 @@ impl Flash {
                 }
 
                 (2, 0x5555, 0x80) => {
-                    info!("FLASH: enter erase mode");
+                    debug!("FLASH: enter erase mode");
                     self.state = State::WaitForCommand(0, CommandContext::Erase);
                 }
                 (2, 0x5555, 0x10) if *ctx == CommandContext::Erase => {
-                    info!("FLASH: erase entire chip");
+                    debug!("FLASH: erase entire chip");
                     self.data.fill(0xFF);
                     self.state = State::WaitForCommand(0, CommandContext::None);
                 }
                 (2, _, 0x30) if *ctx == CommandContext::Erase => {
                     let sector = (addr >> 12) as usize;
-                    info!("FLASH: erase sector {sector}");
+                    debug!("FLASH: erase sector {sector}");
                     self.data[sector * 0x1000..(sector + 1) * 0x1000].fill(0xFF);
                     self.state = State::WaitForCommand(0, CommandContext::None);
                 }
 
                 (2, 0x5555, 0xA0) => {
-                    info!("FLASH: write single byte");
+                    debug!("FLASH: write single byte");
                     self.state = State::WriteSingleByte;
                 }
 
                 (2, 0x5555, 0xB0) => {
-                    info!("FLASH: enter bank change");
+                    debug!("FLASH: enter bank change");
                     self.state = State::BankChange;
                 }
 

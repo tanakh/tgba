@@ -1,6 +1,7 @@
 use log::debug;
+use serde::{Deserialize, Serialize};
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct Interrupt {
     master_enable: bool,
     enable: u16,

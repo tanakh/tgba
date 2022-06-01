@@ -5,12 +5,12 @@ extern crate prettytable;
 
 use anyhow::{anyhow, bail, Result};
 use compress_tools::{list_archive_files, uncompress_archive_file};
-use log::info;
+use log::{error, info};
 use sdl2::{
     audio::{AudioQueue, AudioSpecDesired},
     controller::{Button, GameController},
     event::Event,
-    keyboard::{Keycode, Scancode},
+    keyboard::{KeyboardState, Keycode, Scancode},
     pixels::Color,
     surface::Surface,
     EventPump,
@@ -78,14 +78,37 @@ pub fn run(bios: &Path, rom_path: &Path) -> Result<()> {
 
     let game_controller_subsystem = sdl_context.game_controller().unwrap();
 
-    let game_controller = game_controller_subsystem.open(0).ok();
+    let game_controller = game_controller_subsystem.open(0).ok().into_iter().collect();
+
+    let mut im = InputManager::new(game_controller);
 
     let mut frames = 0;
+    let mut cur_slot = 0_u32;
 
     while process_events(&mut event_pump) {
         let start_time = std::time::Instant::now();
 
-        let key_input = get_key_input(&event_pump, &game_controller);
+        im.update(&event_pump);
+
+        if im.hotkey_pressed(HotKey::SaveState) {
+            save_state(&agb, &rom_path, cur_slot)?;
+        }
+        if im.hotkey_pressed(HotKey::LoadState) {
+            if let Err(err) = load_state(&mut agb, &rom_path, cur_slot) {
+                error!("Failed to load state from slot {cur_slot}: {err}");
+            }
+        }
+
+        if im.hotkey_pressed(HotKey::NextSlot) {
+            cur_slot += 1;
+            info!("State save slot changed: {cur_slot}");
+        }
+        if im.hotkey_pressed(HotKey::PrevSlot) {
+            cur_slot = cur_slot.saturating_sub(1);
+            info!("State save slot changed: {cur_slot}");
+        }
+
+        let key_input = im.key_input();
         agb.set_key_input(&key_input);
         agb.run_frame();
 
@@ -138,7 +161,7 @@ pub fn run(bios: &Path, rom_path: &Path) -> Result<()> {
 
         frames += 1;
 
-        if frames % 600 == 0 {
+        if frames % (60 * 60) == 0 {
             if let Some(backup) = agb.backup() {
                 save_backup(&rom_path, backup)?;
             }
@@ -166,35 +189,168 @@ fn process_events(event_pump: &mut EventPump) -> bool {
     true
 }
 
-fn get_key_input(e: &EventPump, game_controller: &Option<GameController>) -> KeyInput {
-    let ks = e.keyboard_state();
+struct InputManager {
+    controllers: Vec<GameController>,
+    key_bind: Vec<(Key, KeyBind)>,
+    cur_key_input: Vec<bool>,
+    hotkey: Vec<(HotKey, KeyBind)>,
+    cur_hotkey: Vec<bool>,
+    prev_hotkey: Vec<bool>,
+}
 
-    let mut ret = KeyInput::default();
-    ret.a = ks.is_scancode_pressed(Scancode::X);
-    ret.b = ks.is_scancode_pressed(Scancode::Z);
-    ret.select = ks.is_scancode_pressed(Scancode::RShift);
-    ret.start = ks.is_scancode_pressed(Scancode::Return);
-    ret.right = ks.is_scancode_pressed(Scancode::Right);
-    ret.left = ks.is_scancode_pressed(Scancode::Left);
-    ret.up = ks.is_scancode_pressed(Scancode::Up);
-    ret.down = ks.is_scancode_pressed(Scancode::Down);
-    ret.r = ks.is_scancode_pressed(Scancode::S);
-    ret.l = ks.is_scancode_pressed(Scancode::A);
+enum Key {
+    A,
+    B,
+    Select,
+    Start,
+    Right,
+    Left,
+    Up,
+    Down,
+    R,
+    L,
+}
 
-    if let Some(game_controller) = game_controller {
-        ret.a = game_controller.button(Button::B);
-        ret.b = game_controller.button(Button::A);
-        ret.select = game_controller.button(Button::Back);
-        ret.start = game_controller.button(Button::Start);
-        ret.right = game_controller.button(Button::DPadRight);
-        ret.left = game_controller.button(Button::DPadLeft);
-        ret.up = game_controller.button(Button::DPadUp);
-        ret.down = game_controller.button(Button::DPadDown);
-        ret.r = game_controller.button(Button::RightShoulder);
-        ret.l = game_controller.button(Button::LeftShoulder);
+#[derive(PartialEq, Eq)]
+enum HotKey {
+    SaveState,
+    LoadState,
+    NextSlot,
+    PrevSlot,
+}
+
+enum KeyBind {
+    Scancode(Scancode),
+    Button(Button),
+    And(Vec<KeyBind>),
+    Or(Vec<KeyBind>),
+}
+
+macro_rules! kbd {
+    ($key:ident) => {
+        KeyBind::Scancode(Scancode::$key)
+    };
+}
+
+macro_rules! pad {
+    ($button:ident) => {
+        KeyBind::Button(Button::$button)
+    };
+}
+
+impl std::ops::BitOr for KeyBind {
+    type Output = KeyBind;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        KeyBind::Or(vec![self, rhs])
+    }
+}
+
+macro_rules! def_key_bind {
+    ($key:path => $e:expr, $($rest:tt)*) => {
+        def_key_bind!($($rest)* ($key, $e))
+    };
+    ($(($key:path, $e:expr))*) => {
+        vec![ $( ($key, $e) ,)* ]
+    };
+}
+
+fn default_key_bind() -> Vec<(Key, KeyBind)> {
+    use Key::*;
+    def_key_bind! {
+        A => kbd!(X) | pad!(B),
+        B => kbd!(Z) | pad!(A),
+        Select => kbd!(RShift) | pad!(Back),
+        Start => kbd!(Return) | pad!(Start),
+        Right => kbd!(Right) | pad!(DPadRight),
+        Left => kbd!(Left) | pad!(DPadLeft),
+        Up => kbd!(Up) | pad!(DPadUp),
+        Down => kbd!(Down) | pad!(DPadDown),
+        R => kbd!(S) | pad!(RightShoulder),
+        L => kbd!(A) | pad!(LeftShoulder),
+    }
+}
+
+fn default_hotkey() -> Vec<(HotKey, KeyBind)> {
+    use HotKey::*;
+    def_key_bind! {
+        SaveState => kbd!(F5),
+        LoadState => kbd!(F7),
+        NextSlot => kbd!(F3),
+        PrevSlot => kbd!(F2),
+    }
+}
+
+impl InputManager {
+    fn new(controllers: Vec<GameController>) -> Self {
+        let key_bind = default_key_bind();
+        let hotkey = default_hotkey();
+
+        Self {
+            controllers,
+            cur_key_input: vec![false; key_bind.len()],
+            key_bind,
+            cur_hotkey: vec![false; hotkey.len()],
+            prev_hotkey: vec![false; hotkey.len()],
+            hotkey,
+        }
     }
 
-    ret
+    fn update(&mut self, e: &EventPump) {
+        let ks = e.keyboard_state();
+
+        for (i, (_, key_bind)) in self.key_bind.iter().enumerate() {
+            self.cur_key_input[i] = self.pressed(&ks, key_bind);
+        }
+
+        self.prev_hotkey.copy_from_slice(&self.cur_hotkey);
+
+        for (i, (_, key_bind)) in self.hotkey.iter().enumerate() {
+            self.cur_hotkey[i] = self.pressed(&ks, key_bind);
+        }
+    }
+
+    fn pressed(&self, ks: &KeyboardState, key_bind: &KeyBind) -> bool {
+        match key_bind {
+            KeyBind::Scancode(sc) => ks.is_scancode_pressed(*sc),
+            KeyBind::Button(button) => match self.controllers.get(0) {
+                Some(c) => c.button(*button),
+                _ => false,
+            },
+            KeyBind::And(keys) => keys.iter().all(|key| self.pressed(ks, key)),
+            KeyBind::Or(keys) => keys.iter().any(|key| self.pressed(ks, key)),
+        }
+    }
+
+    fn key_input(&self) -> KeyInput {
+        let mut ret = KeyInput::default();
+
+        for (i, (key, _)) in self.key_bind.iter().enumerate() {
+            *match key {
+                Key::A => &mut ret.a,
+                Key::B => &mut ret.b,
+                Key::Select => &mut ret.select,
+                Key::Start => &mut ret.start,
+                Key::Right => &mut ret.right,
+                Key::Left => &mut ret.left,
+                Key::Up => &mut ret.up,
+                Key::Down => &mut ret.down,
+                Key::R => &mut ret.r,
+                Key::L => &mut ret.l,
+            } = self.cur_key_input[i];
+        }
+
+        ret
+    }
+
+    fn hotkey_pressed(&self, hotkey: HotKey) -> bool {
+        for (i, (key, _)) in self.hotkey.iter().enumerate() {
+            if *key == hotkey {
+                return !self.prev_hotkey[i] && self.cur_hotkey[i];
+            }
+        }
+        false
+    }
 }
 
 fn load_rom(file: &Path) -> Result<Rom> {
@@ -247,8 +403,7 @@ fn backup_dir() -> Result<PathBuf> {
 }
 
 fn load_backup(rom_path: &Path) -> Result<Option<Vec<u8>>> {
-    let backup_dir = backup_dir()?;
-    let backup_path = backup_dir.join(rom_path.with_extension("sav").file_name().unwrap());
+    let backup_path = backup_dir()?.join(rom_path.with_extension("sav").file_name().unwrap());
 
     if backup_path.exists() {
         info!("Loading backup from: `{}`", backup_path.display());
@@ -260,11 +415,35 @@ fn load_backup(rom_path: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 fn save_backup(rom_path: &Path, backup: Vec<u8>) -> Result<()> {
-    let backup_dir = backup_dir()?;
-    let backup_path = backup_dir.join(rom_path.with_extension("sav").file_name().unwrap());
+    let backup_path = backup_dir()?.join(rom_path.with_extension("sav").file_name().unwrap());
 
     info!("Saving backup to: `{}`", backup_path.display());
     std::fs::write(backup_path, backup)?;
+    Ok(())
+}
+
+fn load_state(agb: &mut Agb, rom_path: &Path, slot: u32) -> Result<()> {
+    let state_path = backup_dir()?.join(
+        rom_path
+            .with_extension(format!("{slot}.state"))
+            .file_name()
+            .unwrap(),
+    );
+    let data = std::fs::read(state_path)?;
+    agb.load_state(&data)?;
+    info!("State loaded from slot {slot}");
+    Ok(())
+}
+
+fn save_state(agb: &Agb, rom_path: &Path, slot: u32) -> Result<()> {
+    let state_path = backup_dir()?.join(
+        rom_path
+            .with_extension(format!("{slot}.state"))
+            .file_name()
+            .unwrap(),
+    );
+    std::fs::write(state_path, agb.save_state())?;
+    info!("State saved to slot {slot}");
     Ok(())
 }
 

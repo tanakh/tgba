@@ -2,6 +2,7 @@ use std::{cmp::min, collections::VecDeque};
 
 use bitvec::prelude::*;
 use log::{debug, warn};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     consts::AUDIO_SAMPLES_PER_SECOND,
@@ -12,6 +13,7 @@ use crate::{
 
 trait_alias!(pub trait Context = Timing + SoundDma + Interrupt);
 
+#[derive(Serialize, Deserialize)]
 pub struct Sound {
     power_on: bool,
     output_ratio_gb: u8, // 00: 1/4, 01: 1/2, 10: Full, 11: Prohibited
@@ -24,12 +26,15 @@ pub struct Sound {
     noise: Noise,
     direct_sound: [DirectSound; 2],
 
+    bias_level: u16,
+    amplitude_resolution: u8,
+
     prev_clock: u64,
     freq_counter: u64,
     frame_counter: u64,
     sampling_counter: u32,
 
-    // #[serde(skip)]
+    #[serde(skip)]
     audio_buffer: AudioBuf,
 }
 
@@ -46,6 +51,9 @@ impl Sound {
             wave: Default::default(),
             noise: Default::default(),
             direct_sound: [DirectSound::new(0), DirectSound::new(1)],
+
+            bias_level: 0x200,
+            amplitude_resolution: 0,
 
             prev_clock: 0,
             freq_counter: 0,
@@ -213,13 +221,13 @@ impl Sound {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 struct ChannelCtrl {
     volume: u8,
     output_ch: [bool; 4],
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct Pulse {
     has_sweep_unit: bool,
     sweep_period: u8,
@@ -509,7 +517,7 @@ impl Pulse {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct Wave {
     enable: bool,
     length: u16,           // Sound Length = (256-t1)*(1/256) seconds
@@ -683,7 +691,7 @@ impl Wave {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct Noise {
     length: u8, // Sound Length = (64-t1)*(1/256) seconds
     initial_volume: u8,
@@ -874,6 +882,7 @@ impl Noise {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct DirectSound {
     ch: u8,
     output: [bool; 2],
@@ -1002,8 +1011,11 @@ impl Sound {
             0x085..=0x087 => 0,
 
             // SOUNDBIAS
-            0x088 => 0x00,
-            0x089 => 0x02,
+            0x088 => self.bias_level as u8,
+            0x089 => pack! {
+                0..=1 => self.bias_level >> 8,
+                6..=7 => self.amplitude_resolution,
+            },
 
             0x08A..=0x08F => 0,
 
@@ -1100,8 +1112,10 @@ impl Sound {
             0x085..=0x087 => {}
 
             // SOUNDBIAS
-            0x088 | 0x089 => {
-                warn!("SOUNDBIAS: 0x{addr:03X} = 0x{data:02X}");
+            0x088 => self.bias_level.view_bits_mut::<Lsb0>()[0..=7].store(data),
+            0x089 => {
+                self.bias_level.view_bits_mut::<Lsb0>()[8..=9].store(data & 3);
+                self.amplitude_resolution = data >> 6;
             }
 
             0x08A..=0x08F => {}

@@ -1,8 +1,10 @@
-use log::{error, info, trace, warn};
+use log::{debug, error, trace, warn};
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct Eeprom {
-    data: Vec<u64>,
     state: EepromState,
+    data: Vec<u64>,
 }
 
 #[derive(Debug)]
@@ -11,6 +13,7 @@ pub enum EepromSize {
     Size8K,
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum EepromState {
     WaitForCommand { step: u32 },
     WaitForAddr { read: bool, addr: u32, pos: u32 },
@@ -28,11 +31,8 @@ impl Eeprom {
                         .chunks(8)
                         .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
                         .collect::<Vec<u64>>();
-                    if matches!(data.len() * 8, 512 | 8192) {
-                        error!(
-                            "Invalid backup size: {:?}, expect 512bits or 8kbits",
-                            data.len()
-                        );
+                    if !matches!(data.len() * 8, 512 | 8192) {
+                        error!("Invalid backup size: {:?}, expect 512B or 8KiB", data.len());
                     }
                     data
                 },
@@ -55,12 +55,12 @@ impl Eeprom {
     pub fn set_size(&mut self, size: EepromSize) {
         match size {
             EepromSize::Size512 => {
-                info!("Setting EEPROM size to 512 bytes");
+                debug!("Setting EEPROM size to 512B");
                 self.data.resize(512 / 8, 0);
             }
             EepromSize::Size8K => {
-                info!("Setting EEPROM size to 8K bytes");
-                self.data.resize(8 * 1024 / 8, 0);
+                debug!("Setting EEPROM size to 8KiB");
+                self.data.resize(8192 / 8, 0);
             }
         }
     }
@@ -97,7 +97,7 @@ impl Eeprom {
                     let data = (self.data[*addr as usize] >> (4 + 63 - *pos)) & 1 != 0;
                     *pos += 1;
                     if *pos >= 64 + 4 {
-                        info!("EEPROM: read command done");
+                        debug!("EEPROM: read command done");
                         self.state = EepromState::WaitForCommand { step: 0 };
                     }
                     data
@@ -137,14 +137,14 @@ impl Eeprom {
                     let addr = if addr_len == 6 { *addr } else { *addr >> 4 };
 
                     self.state = if *read {
-                        info!("EEPROM: read 0x{:03X}", addr);
+                        debug!("EEPROM: read 0x{:03X}", addr);
                         EepromState::Reading {
                             addr,
                             pos: 0,
                             ready: false,
                         }
                     } else {
-                        info!("EEPROM: write 0x{:03X}", addr);
+                        debug!("EEPROM: write 0x{:03X}", addr);
                         EepromState::Writing {
                             addr,
                             pos: 0,
@@ -168,7 +168,7 @@ impl Eeprom {
                     if data {
                         warn!("EEPROM: 0 must be written the end of write command");
                     }
-                    info!("EEPROM: write 0x{:03X} = 0x{:016X}", *addr, *buf);
+                    debug!("EEPROM: write 0x{:03X} = 0x{:016X}", *addr, *buf);
                     self.data[*addr as usize] = *buf;
                     self.state = EepromState::WaitForCommand { step: 0 };
                 } else {

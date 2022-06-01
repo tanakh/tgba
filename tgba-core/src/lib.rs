@@ -67,4 +67,26 @@ impl Agb {
         use context::Bus;
         self.ctx.bus().backup().data()
     }
+
+    pub fn save_state(&self) -> Vec<u8> {
+        bincode::serialize(&self.ctx).unwrap()
+    }
+
+    pub fn load_state(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        use context::{Bus, Lcd};
+        use std::mem::swap;
+
+        let mut ctx: Context = bincode::deserialize(data)?;
+
+        // Restore unsaved components
+        swap(&mut self.ctx.bus_mut().rom, &mut ctx.bus_mut().rom);
+        swap(&mut self.ctx.bus_mut().bios, &mut ctx.bus_mut().bios);
+        swap(
+            &mut self.ctx.lcd_mut().frame_buf,
+            &mut ctx.lcd_mut().frame_buf,
+        );
+
+        self.ctx = ctx;
+        Ok(())
+    }
 }

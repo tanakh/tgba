@@ -2,6 +2,7 @@ use std::{cmp::min, fmt::UpperHex, mem::size_of};
 
 use bitvec::prelude::*;
 use log::{debug, info, trace, warn};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     backup::Backup,
@@ -18,11 +19,18 @@ use crate::{
 
 trait_alias!(pub trait Context = Lcd + Sound + Timing + SoundDma + Interrupt);
 
+#[derive(Serialize, Deserialize)]
 pub struct Bus {
-    bios: Vec<u8>,
+    #[serde(skip)]
+    pub bios: Vec<u8>,
+    #[serde(skip)]
+    pub rom: Rom,
+
+    #[serde(with = "serde_bytes")]
     ram: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     ext_ram: Vec<u8>,
-    rom: Rom,
+
     backup: Backup,
 
     dma: [Dma; 4],
@@ -50,7 +58,7 @@ pub struct Bus {
     wait_cycles: WaitCycles,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct WaitCycles {
     gamepak_rom_1st_8: [u64; 3],
     gamepak_rom_1st_16: [u64; 3],
@@ -247,7 +255,7 @@ impl Bus {
             0x4 => {
                 ctx.elapse(1);
                 let data = self.io_read8(ctx, addr & 0xFFFF);
-                trace_io::<u8, true>(addr, data);
+                trace_io::<u8, true>(addr, data, ctx.lcd().line());
                 data
             }
 
@@ -306,7 +314,7 @@ impl Bus {
             0x4 => {
                 ctx.elapse(1);
                 let data = self.io_read16(ctx, addr & 0xFFFE);
-                trace_io::<u16, true>(addr, data);
+                trace_io::<u16, true>(addr, data, ctx.lcd().line());
                 data
             }
 
@@ -367,7 +375,7 @@ impl Bus {
                 let lo = self.io_read16(ctx, addr);
                 let hi = self.io_read16(ctx, addr + 2);
                 let data = (hi as u32) << 16 | lo as u32;
-                trace_io::<u32, true>(addr, data);
+                trace_io::<u32, true>(addr, data, ctx.lcd().line());
                 data
             }
 
@@ -485,7 +493,7 @@ impl Bus {
 
             0x4 => {
                 ctx.elapse(1);
-                trace_io::<u8, false>(addr, data);
+                trace_io::<u8, false>(addr, data, ctx.lcd().line());
                 self.io_write8(ctx, addr & 0xFFFF, data);
             }
 
@@ -539,7 +547,7 @@ impl Bus {
 
             0x4 => {
                 ctx.elapse(1);
-                trace_io::<u16, false>(addr, data);
+                trace_io::<u16, false>(addr, data, ctx.lcd().line());
                 self.io_write16(ctx, addr & 0xFFFE, data);
             }
 
@@ -600,7 +608,7 @@ impl Bus {
 
             0x4 => {
                 ctx.elapse(1);
-                trace_io::<u32, false>(addr, data);
+                trace_io::<u32, false>(addr, data, ctx.lcd().line());
                 let addr = addr & 0xFFFC;
                 self.io_write16(ctx, addr, data as u16);
                 self.io_write16(ctx, addr + 2, (data >> 16) as u16);
@@ -674,6 +682,11 @@ impl Bus {
             0x0E0..=0x0FE => 0,
             0x100..=0x10E => self.timers.read16(addr),
 
+            0x120..=0x126 => {
+                warn!("Read SIOMULTI");
+                0
+            }
+
             // SIOCNT
             0x128 => {
                 // TODO
@@ -695,6 +708,12 @@ impl Bus {
                 14    => self.key_interrupt_enable,
                 15    => self.key_interrupt_cond,
             },
+
+            // RCNT
+            0x134 => {
+                warn!("Read RCNT");
+                0
+            }
 
             // JOY_RECV
             0x150 => 0,
@@ -754,6 +773,12 @@ impl Bus {
             // SIODATA8
             0x12A => self.sio.data8 = data as u8,
             0x12B..=0x12F => {}
+
+            // RCNT
+            0x134 | 0x135 => {
+                let ofs = addr - 0x134;
+                info!("RCNT:{ofs} = 0x{data:02X}");
+            }
 
             // JOYCNT
             0x140 => {
@@ -829,11 +854,6 @@ impl Bus {
                 self.key_interrupt_cond = data[15];
             }
 
-            // RCNT
-            0x134 => {
-                info!("RCNT = 0x{data:04X}");
-            }
-
             // JOY_RECV_L
             0x150 => {
                 info!("JOY_RECV_L = 0x{data:04X}");
@@ -904,7 +924,7 @@ impl Bus {
     }
 }
 
-fn trace_io<T: UpperHex, const READ: bool>(addr: u32, data: T) {
+fn trace_io<T: UpperHex, const READ: bool>(addr: u32, data: T, line: u32) {
     let addr = addr & 0xFFFF;
 
     if !log::log_enabled!(log::Level::Trace) {
@@ -929,5 +949,5 @@ fn trace_io<T: UpperHex, const READ: bool>(addr: u32, data: T) {
 
     let dir = if READ { "Read" } else { "Write" };
 
-    trace!("{dir}{size}: 0x{addr:03X} = 0x{data} # {annot}");
+    trace!("Line: {line:3}: {dir:5}{size:2}: 0x{addr:03X} = 0x{data} # {annot}");
 }

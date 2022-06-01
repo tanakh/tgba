@@ -1,5 +1,6 @@
 use bitvec::prelude::*;
 use log::{debug, trace, warn};
+use serde::{Deserialize, Serialize};
 use std::mem::size_of;
 
 use crate::{
@@ -16,6 +17,7 @@ type ArmDisasm = fn(u32, u32) -> String;
 type ThumbOp<C> = fn(&mut Cpu<C>, &mut C, u16);
 type ThumbDisasm = fn(u16, u32) -> String;
 
+#[derive(Serialize, Deserialize)]
 pub struct Cpu<C: Context> {
     regs: Registers,
     pc_changed: bool,
@@ -25,11 +27,30 @@ pub struct Cpu<C: Context> {
 
     trace: bool,
 
+    #[serde(skip)]
+    op_tables: OpTables<C>,
+}
+
+struct OpTables<C: Context> {
     arm_op_table: [ArmOp<C>; 0x1000],
     arm_disasm_table: [ArmDisasm; 0x1000],
 
     thumb_op_table: [ThumbOp<C>; 0x400],
     thumb_disasm_table: [ThumbDisasm; 0x400],
+}
+
+impl<C: Context> Default for OpTables<C> {
+    fn default() -> Self {
+        let (arm_op_table, arm_disasm_table) = build_arm_table();
+        let (thumb_op_table, thumb_disasm_table) = build_thumb_table();
+
+        Self {
+            arm_op_table,
+            arm_disasm_table,
+            thumb_op_table,
+            thumb_disasm_table,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -92,6 +113,7 @@ fn mode_name(mode: u8) -> &'static str {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Registers {
     r: [u32; 16],
 
@@ -260,19 +282,13 @@ fn reg_bank(mode: u8) -> (&'static [usize; 16], Option<usize>) {
 
 impl<C: Context> Cpu<C> {
     pub fn new() -> Self {
-        let (arm_op_table, arm_disasm_table) = build_arm_table();
-        let (thumb_op_table, thumb_disasm_table) = build_thumb_table();
-
         Cpu {
             regs: Registers::default(),
             pc_changed: false,
             fetch_first: false,
             prev_regs: [0; 16],
             trace: false,
-            arm_op_table,
-            arm_disasm_table,
-            thumb_op_table,
-            thumb_disasm_table,
+            op_tables: OpTables::default(),
         }
     }
 
@@ -302,7 +318,7 @@ impl<C: Context> Cpu<C> {
         //     trace!("HB: {}", ctx.now());
         // }
 
-        // if ctx.now() >= 187286755 - 100 {
+        // if ctx.now() >= 76008322 - 100 {
         //     self.trace = true;
         // }
 
@@ -382,7 +398,7 @@ impl<C: Context> Cpu<C> {
             self.pc_changed = false;
 
             let ix = (instr >> 16) & 0xFF0 | (instr >> 4) & 0xF;
-            self.arm_op_table[ix as usize](self, ctx, instr);
+            self.op_tables.arm_op_table[ix as usize](self, ctx, instr);
 
             if !self.pc_changed {
                 self.regs.r[15] = self.regs.r[15].wrapping_sub(4);
@@ -403,7 +419,7 @@ impl<C: Context> Cpu<C> {
         }
 
         let ix = instr >> 6;
-        self.thumb_op_table[ix as usize](self, ctx, instr);
+        self.op_tables.thumb_op_table[ix as usize](self, ctx, instr);
     }
 
     fn fetch32(&mut self, ctx: &mut impl Context) -> u32 {
@@ -1750,13 +1766,13 @@ fn arm_op_ldst<
 
     let addr = if P { ea } else { base };
 
-    if W || !P {
-        // Write-back must not be specified if R15 is specified as the base register (Rn).
-        assert_ne!(rn, 15);
-        cpu.regs.r[rn] = ea;
-    }
-
     if L {
+        if W || !P {
+            // Write-back must not be specified if R15 is specified as the base register (Rn).
+            assert_ne!(rn, 15);
+            cpu.regs.r[rn] = ea;
+        }
+
         let data = if B {
             u8::load(ctx, addr, true)
         } else {
@@ -1779,6 +1795,12 @@ fn arm_op_ldst<
             u32::store(ctx, addr, data, true);
         }
         cpu.fetch_first = true;
+
+        if W || !P {
+            // Write-back must not be specified if R15 is specified as the base register (Rn).
+            assert_ne!(rn, 15);
+            cpu.regs.r[rn] = ea;
+        }
     }
 }
 
@@ -1886,13 +1908,13 @@ fn arm_op_ldsth<
 
     let addr = if P { ea } else { base };
 
-    if W || !P {
-        // Write-back should not be specified if R15 is specified as the base register (Rn).
-        assert_ne!(rn, 15);
-        cpu.regs.r[rn] = ea;
-    }
-
     if L {
+        if W || !P {
+            // Write-back should not be specified if R15 is specified as the base register (Rn).
+            assert_ne!(rn, 15);
+            cpu.regs.r[rn] = ea;
+        }
+
         let data = T::load(ctx, addr, true);
         ctx.elapse(1);
         cpu.fetch_first = true;
@@ -1907,6 +1929,12 @@ fn arm_op_ldsth<
         let data = cpu.regs.r[rd].wrapping_add(if rd == 15 { 4 } else { 0 });
         T::store(ctx, addr, data, true);
         cpu.fetch_first = true;
+
+        if W || !P {
+            // Write-back should not be specified if R15 is specified as the base register (Rn).
+            assert_ne!(rn, 15);
+            cpu.regs.r[rn] = ea;
+        }
     }
 }
 
@@ -1982,12 +2010,20 @@ fn arm_op_ldstm<
     assert_ne!(rn, 15);
 
     let base = cpu.regs.r[rn];
-    let cnt = (instr & 0xFFFF).count_ones();
-    let end = if UP {
-        base.wrapping_add(cnt * 4)
-    } else {
-        base.wrapping_sub(cnt * 4)
+
+    let rlist = instr & 0xFFFF;
+
+    // Empty Rlist: R15 loaded/stored (ARMv4 only), and Rb=Rb+40h (ARMv4-v5).
+
+    let end = {
+        let cnt = if rlist != 0 { rlist.count_ones() } else { 16 };
+        if UP {
+            base.wrapping_add(cnt * 4)
+        } else {
+            base.wrapping_sub(cnt * 4)
+        }
     };
+
     let start = if UP {
         if PRE {
             base.wrapping_add(4)
@@ -2057,32 +2093,38 @@ fn arm_op_ldstm<
         }
     };
 
-    for i in 0..16 {
-        if instr & (1 << i) == 0 {
+    for i in 0..15 {
+        if rlist & (1 << i) == 0 {
             continue;
         }
 
         if L {
             wb(cpu);
-
             let data = ctx.read32(addr, first);
             cpu.fetch_first = true;
-            if i != 15 {
-                cpu.regs.r[i] = data;
-            } else {
-                cpu.set_pc(ctx, data);
-            }
+            cpu.regs.r[i] = data;
         } else {
-            // Whenever R15 is stored to memory the stored value is the address of the STM
-            // instruction plus 12.
-            let data = cpu.regs.r[i].wrapping_add(if i == 15 { 4 } else { 0 });
-            ctx.write32(addr, data, first);
+            ctx.write32(addr, cpu.regs.r[i], first);
             cpu.fetch_first = true;
-
             wb(cpu);
         }
         first = false;
         addr = addr.wrapping_add(4)
+    }
+
+    if rlist & (1 << 15) != 0 || rlist == 0 {
+        if L {
+            wb(cpu);
+            let data = ctx.read32(addr, first);
+            cpu.fetch_first = true;
+            cpu.set_pc(ctx, data);
+        } else {
+            // Whenever R15 is stored to memory the stored value is the address of the STM
+            // instruction plus 12.
+            ctx.write32(addr, cpu.regs.r[15].wrapping_add(4), first);
+            cpu.fetch_first = true;
+            wb(cpu);
+        }
     }
 
     wb(cpu);
@@ -2369,12 +2411,12 @@ impl<C: Context> Cpu<C> {
 
     fn disasm_arm(&self, instr: u32, pc: u32) -> String {
         let ix = (instr >> 16) & 0xFF0 | (instr >> 4) & 0xF;
-        self.arm_disasm_table[ix as usize](instr, pc)
+        self.op_tables.arm_disasm_table[ix as usize](instr, pc)
     }
 
     fn disasm_thumb(&self, instr: u16, pc: u32) -> String {
         let ix = instr >> 6;
-        self.thumb_disasm_table[ix as usize](instr, pc)
+        self.op_tables.thumb_disasm_table[ix as usize](instr, pc)
     }
 }
 
