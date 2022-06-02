@@ -445,13 +445,13 @@ impl Bus {
             return self.backup.read_eeprom() as u16;
         }
 
-        let addr = addr & 0x01FFFFFE;
-
-        if (addr as usize) >= self.rom.data.len() {
+        if (addr as usize & 0x01FFFFFE) >= self.rom.data.len() {
             ctx.elapse(wc);
-            warn!("Write to invalid Game Pak ROM address: {addr:08X}");
+            warn!("Read from invalid Game Pak ROM address: 0x{addr:08X}");
             return 0;
         }
+
+        let addr = addr & 0x01FFFFFE;
 
         if !self.prefetch_buffer {
             ctx.elapse(wc);
@@ -600,7 +600,7 @@ impl Bus {
                 if self.is_valid_eeprom_addr(addr) {
                     self.backup.write_eeprom(data & 1 != 0);
                 } else {
-                    warn!("Write to invalid Game Pak ROM address: {addr:08X}");
+                    warn!("Write to invalid Game Pak ROM address: 0x{addr:08X} = 0x{data:04X}");
                 }
             }
 
@@ -946,7 +946,7 @@ impl Bus {
             return false;
         }
         let ofs = addr & 0x01FFFFFF;
-        let large_rom = self.rom.data.len() >= 0x01000000;
+        let large_rom = self.rom.data.len() > 0x01000000;
         (!large_rom && ofs & 0x01000000 != 0) || (large_rom && ofs & 0x01FFFF00 == 0x01FFFF00)
     }
 }

@@ -53,16 +53,22 @@ impl Eeprom {
     }
 
     pub fn set_size(&mut self, size: EepromSize) {
-        match size {
-            EepromSize::Size512 => {
-                debug!("Setting EEPROM size to 512B");
-                self.data.resize(512 / 8, 0);
-            }
-            EepromSize::Size8K => {
-                debug!("Setting EEPROM size to 8KiB");
-                self.data.resize(8192 / 8, 0);
-            }
+        let words = match size {
+            EepromSize::Size512 => 512 / 8,
+            EepromSize::Size8K => 8192 / 8,
+        };
+
+        if self.data.is_empty() {
+            debug!("Setting EEPROM size to {} bytes", words * 8);
+        } else if self.data.len() != words as usize {
+            warn!(
+                "Different EEPROM size detected: {} bytes, previous = {} bytes",
+                words * 8,
+                self.data.len() * 8
+            );
         }
+
+        self.data.resize(words, 0);
     }
 
     pub fn data(&self) -> Vec<u8> {
@@ -88,7 +94,7 @@ impl Eeprom {
             EepromState::WaitForAddr { .. } => false,
             EepromState::Reading { addr, pos, ready } => {
                 if !*ready {
-                    panic!("EEPROM: not ready for reading");
+                    panic!("Not ready for reading");
                 }
                 if *pos < 4 {
                     *pos += 1;
@@ -97,7 +103,7 @@ impl Eeprom {
                     let data = (self.data[*addr as usize] >> (4 + 63 - *pos)) & 1 != 0;
                     *pos += 1;
                     if *pos >= 64 + 4 {
-                        debug!("EEPROM: read command done");
+                        debug!("Read command done");
                         self.state = EepromState::WaitForCommand { step: 0 };
                     }
                     data
@@ -106,12 +112,12 @@ impl Eeprom {
             EepromState::Writing { .. } => false,
         };
 
-        trace!("EEPROM: read {:?}", data as u8);
+        trace!("Read {:?}", data as u8);
         data
     }
 
     pub fn write(&mut self, data: bool) {
-        trace!("EEPROM: write {:?}", data as u8);
+        trace!("Write {:?}", data as u8);
 
         let addr_len = self.addr_len();
 
@@ -137,14 +143,14 @@ impl Eeprom {
                     let addr = if addr_len == 6 { *addr } else { *addr >> 4 };
 
                     self.state = if *read {
-                        debug!("EEPROM: read 0x{:03X}", addr);
+                        debug!("Read 0x{:03X}", addr);
                         EepromState::Reading {
                             addr,
                             pos: 0,
                             ready: false,
                         }
                     } else {
-                        debug!("EEPROM: write 0x{:03X}", addr);
+                        debug!("Write 0x{:03X}", addr);
                         EepromState::Writing {
                             addr,
                             pos: 0,
@@ -156,19 +162,19 @@ impl Eeprom {
             EepromState::Reading { ready, .. } => {
                 if !*ready {
                     if data {
-                        warn!("EEPROM: 0 must be written at the end of write command");
+                        warn!("0 must be written at the end of read command");
                     }
                     *ready = true;
                 } else {
-                    panic!("EEPROM: invalid write while read command");
+                    panic!("Invalid write while read command");
                 }
             }
             EepromState::Writing { addr, pos, buf } => {
                 if *pos == 64 {
                     if data {
-                        warn!("EEPROM: 0 must be written the end of write command");
+                        warn!("0 must be written at the end of write command");
                     }
-                    debug!("EEPROM: write 0x{:03X} = 0x{:016X}", *addr, *buf);
+                    debug!("Write 0x{:03X} = 0x{:016X}", *addr, *buf);
                     self.data[*addr as usize] = *buf;
                     self.state = EepromState::WaitForCommand { step: 0 };
                 } else {

@@ -223,11 +223,7 @@ impl Bus {
             self.dma(ch).word_count
         };
 
-        if ch == 3
-            && self.is_valid_eeprom_addr(self.dma(ch).dest_addr_internal)
-            && word_len == 2
-            && matches!(self.backup().eeprom_size(), Some(None))
-        {
+        if ch == 3 && self.is_valid_eeprom_addr(self.dma(ch).dest_addr_internal) && word_len == 2 {
             match word_count {
                 9 => self.backup_mut().set_eeprom_size(EepromSize::Size512),
                 17 => self.backup_mut().set_eeprom_size(EepromSize::Size8K),
