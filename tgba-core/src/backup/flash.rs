@@ -111,12 +111,12 @@ impl Flash {
                 (1, 0x2AAA, 0x55) => *step = 2,
 
                 (2, 0x5555, 0x90) if *ctx == CommandContext::None => {
-                    debug!("FLASH: enter ID mode");
+                    debug!("Enter ID mode");
                     self.read_mode = ReadMode::ChipId;
                     self.state = State::WaitForCommand(0, CommandContext::None);
                 }
                 (2, 0x5555, 0xF0) if *ctx == CommandContext::None => {
-                    debug!("FLASH: terminate ID mode");
+                    debug!("Terminate ID mode");
                     if self.read_mode != ReadMode::ChipId {
                         panic!("FLASH: leave ID mode without entering");
                     }
@@ -125,48 +125,49 @@ impl Flash {
                 }
 
                 (2, 0x5555, 0x80) => {
-                    debug!("FLASH: enter erase mode");
+                    debug!("Enter erase mode");
                     self.state = State::WaitForCommand(0, CommandContext::Erase);
                 }
                 (2, 0x5555, 0x10) if *ctx == CommandContext::Erase => {
-                    debug!("FLASH: erase entire chip");
+                    debug!("Erase entire chip");
                     self.data.fill(0xFF);
                     self.state = State::WaitForCommand(0, CommandContext::None);
                 }
                 (2, _, 0x30) if *ctx == CommandContext::Erase => {
                     let sector = (addr >> 12) as usize;
-                    debug!("FLASH: erase sector {sector}");
-                    self.data[sector * 0x1000..(sector + 1) * 0x1000].fill(0xFF);
+                    debug!("Erase sector {sector}");
+                    let start = self.bank as usize * 0x10000 + sector * 0x1000;
+                    self.data[start..start + 0x1000].fill(0xFF);
                     self.state = State::WaitForCommand(0, CommandContext::None);
                 }
 
                 (2, 0x5555, 0xA0) => {
-                    debug!("FLASH: write single byte");
+                    trace!("Write single byte");
                     self.state = State::WriteSingleByte;
                 }
 
                 (2, 0x5555, 0xB0) => {
-                    debug!("FLASH: enter bank change");
+                    trace!("Enter bank change");
                     self.state = State::BankChange;
                 }
 
                 _ => {
-                    warn!(
-                        "FLASH: invalid command: data=0x{data:02X}, state:{:?}",
-                        self.state
-                    );
+                    warn!("Invalid command: data=0x{data:02X}, state:{:?}", self.state);
                 }
             },
 
             State::WriteSingleByte => {
                 // Only 1 -> 0 write is possible
-                self.data[self.bank as usize * 0x10000 + (addr as usize & 0xFFFF)] &= data;
+                let addr = self.bank as usize * 0x10000 + (addr as usize & 0xFFFF);
+                self.data[addr] &= data;
+                debug!("Write single byte: 0x{addr:05X} = 0x{data:02X}");
                 self.state = State::WaitForCommand(0, CommandContext::None);
             }
 
             State::BankChange => {
                 assert_eq!(addr, 0);
                 assert!((data as usize) < self.data.len() / (64 * 1024));
+                debug!("Bank change: {data}");
                 self.bank = data as u32;
                 self.state = State::WaitForCommand(0, CommandContext::None);
             }
