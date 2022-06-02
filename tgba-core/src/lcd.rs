@@ -267,7 +267,7 @@ impl Lcd {
     fn tick_dot(&mut self, ctx: &mut impl Context) {
         self.x += 1;
 
-        if self.y < SCREEN_HEIGHT && self.x == SCREEN_WIDTH {
+        if self.x == SCREEN_WIDTH {
             trace!(
                 "Enter HBLANK: frame:{}, y:{:03}, cycle: {}",
                 self.frame,
