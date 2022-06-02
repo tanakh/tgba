@@ -767,8 +767,6 @@ impl Lcd {
             } else {
                 // 256 x 1 color mode
 
-                let char = char & 0x1FF;
-
                 assert!(char_base_addr + char * 64 + oy * 8 + ox < self.vram.len(), "too large index: char_base: {char_base_addr:08X}, char: 0x{char:03X}, ox: {ox}, oy: {oy}, b0: 0x{b0:02X}, b1: 0x{b1:02X}");
 
                 let col = self.vram[char_base_addr + char * 64 + oy * 8 + ox];
