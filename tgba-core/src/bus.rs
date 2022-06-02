@@ -770,10 +770,13 @@ impl Bus {
 
             0xF600..=0xFFFE => 0,
 
-            _ => todo!(
-                "IO read16: 0x{addr:03X} ({})",
-                get_io_reg(addr).map_or("N/A", |r| r.name)
-            ),
+            _ => {
+                warn!(
+                    "IO read: 0x{addr:03X}:16 ({})",
+                    get_io_reg(addr).map_or("N/A", |r| r.name)
+                );
+                0
+            }
         }
     }
 
@@ -846,8 +849,8 @@ impl Bus {
                 }
             }
 
-            _ => todo!(
-                "IO write8: 0x{addr:03X} ({}) = 0x{data:02X}",
+            _ => warn!(
+                "IO write: 0x{addr:03X}:8 ({}) = 0x{data:02X}",
                 get_io_reg(addr).map_or("N/A", |r| r.name)
             ),
         }
