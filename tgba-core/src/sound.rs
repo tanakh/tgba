@@ -914,15 +914,15 @@ impl DirectSound {
         self.fifo.push_back(data);
     }
 
-    fn timer_overflow(&mut self, ctx: &mut impl Context, ch: u8) {
-        if ch != self.timer_ch {
+    fn timer_overflow(&mut self, ctx: &mut impl Context, timer_ch: u8) {
+        if timer_ch != self.timer_ch {
             return;
         }
 
         self.current_output = self.fifo.pop_front();
 
-        if self.current_output.is_none() {
-            debug!("Sound buffer empty");
+        if self.current_output.is_none() && (self.output[0] || self.output[1]) {
+            warn!("Direct sound {}: FIFO empty", self.ch,);
         }
 
         if self.fifo.len() <= 16 {
@@ -1124,12 +1124,7 @@ impl Sound {
             0x090..=0x09F => self.wave.write_ram(addr & 0xF, data),
 
             // Sound FIFO
-            0x0A0..=0x0A3 => {
-                // use std::io::Write;
-                // std::io::stdout().write(&[data]).unwrap();
-
-                self.direct_sound[0].push_fifo(data);
-            }
+            0x0A0..=0x0A3 => self.direct_sound[0].push_fifo(data),
             0x0A4..=0x0A7 => self.direct_sound[1].push_fifo(data),
 
             0x0A8..=0x0AF => {}

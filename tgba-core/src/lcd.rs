@@ -5,7 +5,9 @@ use log::{debug, trace};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    consts::{CLOCK_PER_DOT, DOTS_PER_LINE, LINES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH},
+    consts::{
+        CLOCK_PER_DOT, DOTS_PER_LINE, HBLANK_POS, LINES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH,
+    },
     context::{Interrupt, Timing},
     interface::{FrameBuf, Pixel},
     interrupt::InterruptKind,
@@ -267,7 +269,7 @@ impl Lcd {
     fn tick_dot(&mut self, ctx: &mut impl Context) {
         self.x += 1;
 
-        if self.x == SCREEN_WIDTH {
+        if self.x == HBLANK_POS {
             trace!(
                 "Enter HBLANK: frame:{}, y:{:03}, cycle: {}",
                 self.frame,
@@ -289,6 +291,17 @@ impl Lcd {
             self.x -= DOTS_PER_LINE;
             self.y += 1;
 
+            if self.y >= LINES_PER_FRAME {
+                self.y -= LINES_PER_FRAME;
+                self.frame += 1;
+
+                if self.y == 0 {
+                    for i in 0..4 {
+                        self.bg[i].frame_start();
+                    }
+                }
+            }
+
             trace!(
                 "Frame:{}, Line:{:03}, cycle: {}",
                 self.frame,
@@ -306,17 +319,6 @@ impl Lcd {
 
             if self.y == self.vcount as u32 && self.vcount_irq_enable {
                 ctx.interrupt_mut().set_interrupt(InterruptKind::VCount);
-            }
-
-            if self.y >= LINES_PER_FRAME {
-                self.y -= LINES_PER_FRAME;
-                self.frame += 1;
-
-                if self.y == 0 {
-                    for i in 0..4 {
-                        self.bg[i].frame_start();
-                    }
-                }
             }
         }
     }
@@ -345,8 +347,8 @@ impl Lcd {
 
             // DISPSTAT
             0x004 => pack! {
-                0 => SCREEN_HEIGHT <= self.y && self.y < 227, // set in line 160..226; not 227
-                1 => self.x >= SCREEN_WIDTH, // toggled in all lines, 0..227
+                0 => SCREEN_HEIGHT <= self.y && self.y < LINES_PER_FRAME - 1, // set in line 160..226; not 227
+                1 => self.x >= HBLANK_POS, // toggled in all lines, 0..227
                 2 => self.y == self.vcount as u32,
                 3 => self.vblank_irq_enable,
                 4 => self.hblank_irq_enable,
