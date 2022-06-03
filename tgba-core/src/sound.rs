@@ -680,11 +680,11 @@ impl Wave {
             } else if self.output_level == 0 {
                 0
             } else if self.output_level == 1 {
-                1
+                4
             } else if self.output_level == 2 {
                 2
             } else {
-                4
+                1
             };
             (self.sample_latch as i16 * 2 - 15) * 128 * amp / 4
         }
