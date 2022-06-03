@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     backup::eeprom::EepromSize,
     bus::Bus,
-    consts::{SCREEN_HEIGHT, SCREEN_WIDTH},
+    consts::{HBLANK_POS, SCREEN_HEIGHT},
     context::{Interrupt, Lcd, Sound, SoundDma, Timing},
     interrupt::InterruptKind,
     util::{enum_pat, pack, trait_alias, ConstEval},
@@ -95,7 +95,7 @@ impl Dma {
             // Start in an H-blank interval
             enum_pat!(StartTiming::HBlank) => {
                 let lcd = ctx.lcd();
-                lcd.x() >= SCREEN_WIDTH
+                lcd.x() >= HBLANK_POS
                     && lcd.line() < SCREEN_HEIGHT
                     && (self.prev_dma_frame, self.prev_dma_line) != (lcd.frame(), lcd.line())
             }
@@ -121,12 +121,12 @@ impl Dma {
         (self.ch == 1 || self.ch == 2) && self.start_timing == StartTiming::Special as u8
     }
 
-    fn trace(&self, ctx: &mut impl Context, src: &[u8]) {
+    fn trace(&self, ctx: &mut impl Context) {
         trace!("DMA{}: cycle: {}", self.ch, ctx.now());
         trace!("  - enable: {}", if self.dma_enable { "yes" } else { "no" });
 
         trace!(
-            "  - src:    0x{:08X} (0x{:08X}) {} = {src:02X?}",
+            "  - src:    0x{:08X} (0x{:08X}) {}",
             self.src_addr_internal,
             self.src_addr,
             match self.src_addr_ctrl {
@@ -194,10 +194,6 @@ impl Bus {
             return;
         }
 
-        if log_enabled!(log::Level::Trace) {
-            self.dma(ch).trace(ctx, &[]);
-        }
-
         // The CPU is paused when DMA transfers are active, however, the CPU is operating during the periods when Sound/Blanking DMA transfers are paused.
 
         // Transfer Rate/Timing
@@ -222,6 +218,10 @@ impl Bus {
         } else {
             self.dma(ch).word_count
         };
+
+        if is_sound_dma && log_enabled!(log::Level::Trace) {
+            self.dma(ch).trace(ctx);
+        }
 
         if ch == 3 && self.is_valid_eeprom_addr(self.dma(ch).dest_addr_internal) && word_len == 2 {
             match word_count {
@@ -259,37 +259,24 @@ impl Bus {
             }
         };
 
+        if self.dma(ch).src_addr_internal % word_len != 0 {
+            warn!(
+                "DMA src addr misaligned: 0x{:08X}",
+                self.dma(ch).src_addr_internal
+            );
+        }
+        if self.dma(ch).dest_addr_internal % word_len != 0 {
+            warn!(
+                "DMA dest addr misaligned: 0x{:08X}",
+                self.dma(ch).dest_addr_internal
+            );
+        }
+
         for i in 0..word_count {
             if word_len == 4 {
-                if self.dma(ch).src_addr_internal % 4 != 0 {
-                    warn!(
-                        "DMA src addr misaligned: 0x{:08X}",
-                        self.dma(ch).src_addr_internal
-                    );
-                }
-                if self.dma(ch).dest_addr_internal % 4 != 0 {
-                    warn!(
-                        "DMA dest addr misaligned: 0x{:08X}",
-                        self.dma(ch).dest_addr_internal
-                    );
-                }
-
                 let data = self.read32(ctx, self.dma(ch).src_addr_internal & !3, i == 0);
                 self.write32(ctx, self.dma(ch).dest_addr_internal & !3, data, i == 0);
             } else {
-                if self.dma(ch).src_addr_internal % 2 != 0 {
-                    warn!(
-                        "DMA src addr misaligned: 0x{:08X}",
-                        self.dma(ch).src_addr_internal
-                    );
-                }
-                if self.dma(ch).dest_addr_internal % 2 != 0 {
-                    warn!(
-                        "DMA dest addr misaligned: 0x{:08X}",
-                        self.dma(ch).dest_addr_internal
-                    );
-                }
-
                 let data = self.read16(ctx, self.dma(ch).src_addr_internal & !1, i == 0);
                 self.write16(ctx, self.dma(ch).dest_addr_internal & !1, data, i == 0);
             }

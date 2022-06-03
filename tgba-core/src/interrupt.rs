@@ -54,6 +54,24 @@ impl Interrupt {
     }
 
     pub fn set_enable(&mut self, enable: u16) {
+        use InterruptKind::*;
+
+        debug!("Set interrupt enable:");
+        debug!("  - VBlank:  {}", enable & (1 << VBlank as u32) != 0);
+        debug!("  - HBlank:  {}", enable & (1 << HBlank as u32) != 0);
+        debug!("  - VCount:  {}", enable & (1 << VCount as u32) != 0);
+        debug!("  - Timer0:  {}", enable & (1 << Timer0 as u32) != 0);
+        debug!("  - Timer1:  {}", enable & (1 << Timer1 as u32) != 0);
+        debug!("  - Timer2:  {}", enable & (1 << Timer2 as u32) != 0);
+        debug!("  - Timer3:  {}", enable & (1 << Timer3 as u32) != 0);
+        debug!("  - Serial:  {}", enable & (1 << Serial as u32) != 0);
+        debug!("  - DMA0:    {}", enable & (1 << Dma0 as u32) != 0);
+        debug!("  - DMA1:    {}", enable & (1 << Dma1 as u32) != 0);
+        debug!("  - DMA2:    {}", enable & (1 << Dma2 as u32) != 0);
+        debug!("  - DMA3:    {}", enable & (1 << Dma3 as u32) != 0);
+        debug!("  - Keypad:  {}", enable & (1 << Keypad as u32) != 0);
+        debug!("  - GamePak: {}", enable & (1 << GamePak as u32) != 0);
+
         self.enable = enable;
     }
 
