@@ -212,14 +212,6 @@ impl Bus {
         }
     }
 
-    pub fn dma(&self, ch: usize) -> &Dma {
-        &self.dma[ch]
-    }
-
-    pub fn dma_mut(&mut self, ch: usize) -> &mut Dma {
-        &mut self.dma[ch]
-    }
-
     pub fn backup(&self) -> &Backup {
         &self.backup
     }
@@ -229,11 +221,23 @@ impl Bus {
     }
 
     pub fn tick(&mut self, ctx: &mut impl Context) {
-        for ch in 0..4 {
-            self.process_dma(ctx, ch);
-        }
-
         self.timers.tick(ctx);
+    }
+
+    pub fn dma(&self, ch: usize) -> &Dma {
+        &self.dma[ch]
+    }
+    pub fn dma_mut(&mut self, ch: usize) -> &mut Dma {
+        &mut self.dma[ch]
+    }
+
+    pub fn dma_tick(&mut self, ctx: &mut impl Context) -> bool {
+        for ch in 0..4 {
+            if self.process_dma(ctx, ch) {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -702,7 +706,12 @@ impl Bus {
                 let hi = ctx.sound_read(addr + 1);
                 (hi as u16) << 8 | lo as u16
             }
-            0x0B0..=0x0DE => self.read_dma16(addr),
+
+            0x0B0..=0x0DE => {
+                let ch = (addr - 0xB0) / 0xC;
+                self.dma(ch as usize).read16(addr - 0xB0 - ch * 0xC)
+            }
+
             0x0E0..=0x0FE => 0,
             0x100..=0x10E => self.timers.read16(addr),
 
@@ -866,7 +875,11 @@ impl Bus {
                 ctx.sound_write(addr, data as u8);
                 ctx.sound_write(addr + 1, (data >> 8) as u8);
             }
-            0x0B0..=0x0DE => self.write_dma16(ctx, addr, data),
+            0x0B0..=0x0DE => {
+                let ch = (addr - 0xB0) / 0xC;
+                self.dma_mut(ch as usize)
+                    .write16(addr - 0xB0 - ch * 0xC, data);
+            }
             0x0E0..=0x0FE => {}
             0x100..=0x10E => self.timers.write16(addr, data),
             0x110..=0x11E => {}

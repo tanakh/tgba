@@ -1,4 +1,4 @@
-use crate::{bus, cpu, interrupt, lcd, rom, sound, KeyInput};
+use crate::{bus, cpu, dma, interrupt, lcd, rom, sound, KeyInput};
 use ambassador::{delegatable_trait, Delegate};
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,7 @@ pub trait Bus {
     fn write32(&mut self, addr: u32, data: u32, first: bool);
 
     fn bus_tick(&mut self);
+    fn dma_tick(&mut self) -> bool;
 
     fn set_key_input(&mut self, key_input: &KeyInput);
 }
@@ -145,6 +146,10 @@ impl Bus for Inner {
 
     fn bus_tick(&mut self) {
         self.bus.tick(&mut self.inner);
+    }
+
+    fn dma_tick(&mut self) -> bool {
+        self.bus.dma_tick(&mut self.inner)
     }
 
     fn set_key_input(&mut self, key_input: &KeyInput) {

@@ -41,7 +41,9 @@ impl Agb {
 
         let start_frame = self.ctx.lcd().frame();
         while start_frame == self.ctx.lcd().frame() {
-            self.ctx.cpu.exec_one(&mut self.ctx.inner);
+            if !self.ctx.dma_tick() {
+                self.ctx.cpu.exec_one(&mut self.ctx.inner);
+            }
             self.ctx.lcd_tick();
             self.ctx.sound_tick();
             self.ctx.bus_tick();

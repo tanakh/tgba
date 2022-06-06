@@ -29,12 +29,16 @@ pub struct Dma {
 
     start_timing: u8,
     irq_enable: bool,
-    dma_enable: bool,
+    enable: bool,
 
-    wait_for_exec: bool,
+    running: bool,
     src_addr_internal: u32,
     dest_addr_internal: u32,
     word_count_internal: u32,
+    word_len_internal: u32,
+    first_access: bool,
+    src_inc: u32,
+    dest_inc: u32,
 
     prev_dma_frame: u64,
     prev_dma_line: u32,
@@ -66,12 +70,16 @@ impl Dma {
             game_pak_data_request_transfer: false,
             start_timing: 0,
             irq_enable: false,
-            dma_enable: false,
+            enable: false,
 
-            wait_for_exec: false,
+            running: false,
             src_addr_internal: 0,
             dest_addr_internal: 0,
             word_count_internal: 0,
+            word_len_internal: 0,
+            first_access: false,
+            src_inc: 0,
+            dest_inc: 0,
 
             prev_dma_frame: 0,
             prev_dma_line: 0,
@@ -87,7 +95,7 @@ impl Dma {
 
     fn check_dma_start(&mut self, ctx: &mut impl Context) -> bool {
         match self.start_timing {
-            enum_pat!(StartTiming::Immediately) => self.wait_for_exec,
+            enum_pat!(StartTiming::Immediately) => false,
             // Start in a V-blank interval
             enum_pat!(StartTiming::VBlank) => {
                 self.prev_dma_frame != ctx.lcd().frame() && ctx.lcd().line() >= SCREEN_HEIGHT
@@ -121,9 +129,9 @@ impl Dma {
         (self.ch == 1 || self.ch == 2) && self.start_timing == StartTiming::Special as u8
     }
 
-    fn trace(&self, ctx: &mut impl Context) {
-        trace!("DMA{}: cycle: {}", self.ch, ctx.now());
-        trace!("  - enable: {}", if self.dma_enable { "yes" } else { "no" });
+    fn trace(&self) {
+        trace!("DMA{}:", self.ch);
+        trace!("  - enable: {}", if self.enable { "yes" } else { "no" });
 
         trace!(
             "  - src:    0x{:08X} (0x{:08X}) {}",
@@ -182,16 +190,188 @@ impl Dma {
         );
         trace!("  - IRQ:    {}", if self.irq_enable { "yes" } else { "no" });
     }
+
+    pub fn read16(&self, addr: u32) -> u16 {
+        match addr {
+            // DMAxSAD
+            0 | 2 => 0,
+
+            // DMAxDAD
+            4 | 6 => 0,
+
+            // DMAxCNT
+            8 => 0,
+            10 => pack! {
+                5..=6   => self.dest_addr_ctrl,
+                7..=8   => self.src_addr_ctrl,
+                9       => self.repeat,
+                10      => self.transfer_type,
+                11      => self.game_pak_data_request_transfer,
+                12..=13 => self.start_timing,
+                14      => self.irq_enable,
+                15      => self.enable,
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn write16(&mut self, addr: u32, data: u16) {
+        match addr {
+            // DMAxSAD
+            0 => self.src_addr.view_bits_mut::<Lsb0>()[0..=15].store(data),
+            2 => {
+                let hi = if self.ch == 0 { 26 } else { 27 };
+                self.src_addr.view_bits_mut::<Lsb0>()[16..=hi].store(data);
+            }
+
+            // DMAxDAD
+            4 => self.dest_addr.view_bits_mut::<Lsb0>()[0..=15].store(data),
+            6 => {
+                let hi = if self.ch != 3 { 26 } else { 27 };
+                self.dest_addr.view_bits_mut::<Lsb0>()[16..=hi].store(data);
+            }
+
+            // DMAxCNT
+            8 => {
+                let mask = if self.ch != 3 { 0x3FFF } else { 0xFFFF };
+                let data = (data & mask) as u32;
+                self.word_count = if data == 0 { mask as u32 + 1 } else { data };
+            }
+            10 => {
+                let v = data.view_bits::<Lsb0>();
+                self.dest_addr_ctrl = v[5..=6].load();
+                self.src_addr_ctrl = v[7..=8].load();
+                self.repeat = v[9];
+                self.transfer_type = v[10];
+                if self.ch == 3 {
+                    self.game_pak_data_request_transfer = v[11];
+                }
+                self.start_timing = v[12..=13].load();
+                self.irq_enable = v[14];
+
+                if !self.enable && v[15] {
+                    // Reload src addr, dest addr and word count
+                    if self.start_timing == StartTiming::Immediately as u8 {
+                        self.start(0, 0);
+                    }
+                    self.src_addr_internal = self.src_addr;
+                    self.dest_addr_internal = self.dest_addr;
+                    self.word_count_internal = self.word_count;
+                }
+
+                self.enable = v[15];
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn start(&mut self, frame: u64, line: u32) {
+        self.running = true;
+
+        self.prev_dma_frame = frame;
+        self.prev_dma_line = line;
+
+        self.word_len_internal = if self.transfer_type { 4 } else { 2 };
+        self.word_count_internal = self.word_count;
+        self.dest_inc = match self.dest_addr_ctrl {
+            // increment
+            0 => self.word_len_internal,
+            // decrement
+            1 => -(self.word_len_internal as i32) as u32,
+            // fixed
+            2 => 0,
+            // increment / reload
+            3 => self.word_len_internal,
+            _ => unreachable!(),
+        };
+
+        self.src_inc = match self.src_addr_ctrl {
+            // increment
+            0 => self.word_len_internal,
+            // decrement
+            1 => -(self.word_len_internal as i32) as u32,
+            // fixed
+            2 => 0,
+            // prohibited
+            3 => panic!(),
+            _ => unreachable!(),
+        };
+
+        if self.is_sound_dma() {
+            self.word_len_internal = 4;
+            self.word_count_internal = 4;
+            self.dest_inc = 0;
+        }
+
+        self.first_access = true;
+
+        if self.src_addr_internal % self.word_len_internal != 0 {
+            warn!("DMA src addr misaligned: 0x{:08X}", self.src_addr_internal);
+        }
+        if self.dest_addr_internal % self.word_len_internal != 0 {
+            warn!(
+                "DMA dest addr misaligned: 0x{:08X}",
+                self.dest_addr_internal
+            );
+        }
+
+        if log_enabled!(log::Level::Trace) {
+            self.trace();
+        }
+    }
+
+    fn step(&mut self, ctx: &mut impl Context) {
+        self.src_addr_internal = self.src_addr_internal.wrapping_add(self.src_inc);
+        self.dest_addr_internal = self.dest_addr_internal.wrapping_add(self.dest_inc);
+
+        self.word_count_internal -= 1;
+
+        if self.word_count_internal == 0 {
+            self.running = false;
+
+            if !self.repeat() {
+                self.enable = false;
+            } else if self.dest_addr_ctrl == 3 {
+                self.dest_addr_internal = self.dest_addr;
+            }
+
+            if self.irq_enable {
+                let kind = match self.ch {
+                    0 => InterruptKind::Dma0,
+                    1 => InterruptKind::Dma1,
+                    2 => InterruptKind::Dma2,
+                    3 => InterruptKind::Dma3,
+                    _ => unreachable!(),
+                };
+                ctx.interrupt_mut().set_interrupt(kind);
+            }
+        }
+    }
 }
 
 impl Bus {
-    pub fn process_dma(&mut self, ctx: &mut impl Context, ch: usize) {
-        if !self.dma(ch).dma_enable {
-            return;
+    pub fn process_dma(&mut self, ctx: &mut impl Context, ch: usize) -> bool {
+        if !self.dma(ch).enable {
+            return false;
         }
 
-        if !self.dma_mut(ch).check_dma_start(ctx) {
-            return;
+        if !self.dma(ch).running {
+            if !self.dma_mut(ch).check_dma_start(ctx) {
+                return false;
+            }
+
+            self.dma_mut(ch).start(ctx.lcd().frame(), ctx.lcd().line());
+
+            if ch == 3
+                && self.is_valid_eeprom_addr(self.dma(ch).dest_addr_internal)
+                && self.dma(ch).word_len_internal == 2
+            {
+                match self.dma(ch).word_count_internal {
+                    9 => self.backup_mut().set_eeprom_size(EepromSize::Size512),
+                    17 => self.backup_mut().set_eeprom_size(EepromSize::Size8K),
+                    c => warn!("Write EEPROM to unknown size with DMA: {c}"),
+                }
+            }
         }
 
         // The CPU is paused when DMA transfers are active, however, the CPU is operating during the periods when Sound/Blanking DMA transfers are paused.
@@ -202,200 +382,38 @@ impl Bus {
         //   2N+2(n-1)S+xI
         // Of which, 1N+(n-1)S are read cycles, and the other 1N+(n-1)S are write cycles, actual number of cycles depends on the waitstates and bus-width of the source and destination areas (as described in CPU Instruction Cycle Times chapter). Internal time for DMA processing is 2I (normally), or 4I (if both source and destination are in gamepak memory area).
 
-        self.dma_mut(ch).prev_dma_frame = ctx.lcd().frame();
-        self.dma_mut(ch).prev_dma_line = ctx.lcd().line();
+        assert!(self.dma(ch).word_count_internal > 0);
 
-        let is_sound_dma = self.dma(ch).is_sound_dma();
-
-        let word_len = if self.dma(ch).transfer_type || is_sound_dma {
-            4
-        } else {
-            2
-        };
-
-        let word_count = if is_sound_dma {
-            4
-        } else {
-            self.dma(ch).word_count
-        };
-
-        if is_sound_dma && log_enabled!(log::Level::Trace) {
-            self.dma(ch).trace(ctx);
-        }
-
-        if ch == 3 && self.is_valid_eeprom_addr(self.dma(ch).dest_addr_internal) && word_len == 2 {
-            match word_count {
-                9 => self.backup_mut().set_eeprom_size(EepromSize::Size512),
-                17 => self.backup_mut().set_eeprom_size(EepromSize::Size8K),
-                _ => warn!("Write EEPROM to unknown size with DMA: {}", word_count),
-            }
-        }
-
-        let src_inc = match self.dma(ch).src_addr_ctrl {
-            // increment
-            0 => word_len,
-            // decrement
-            1 => -(word_len as i32) as u32,
-            // fixed
-            2 => 0,
-            // prohibited
-            3 => panic!(),
-            _ => unreachable!(),
-        };
-
-        let dest_inc = if is_sound_dma {
-            0
-        } else {
-            match self.dma(ch).dest_addr_ctrl {
-                // increment
-                0 => word_len,
-                // decrement
-                1 => -(word_len as i32) as u32,
-                // fixed
-                2 => 0,
-                // increment / reload
-                3 => word_len,
-                _ => unreachable!(),
-            }
-        };
-
-        if self.dma(ch).src_addr_internal % word_len != 0 {
-            warn!(
-                "DMA src addr misaligned: 0x{:08X}",
-                self.dma(ch).src_addr_internal
+        if self.dma(ch).word_len_internal == 4 {
+            let data = self.read32(
+                ctx,
+                self.dma(ch).src_addr_internal & !3,
+                self.dma(ch).first_access,
             );
-        }
-        if self.dma(ch).dest_addr_internal % word_len != 0 {
-            warn!(
-                "DMA dest addr misaligned: 0x{:08X}",
-                self.dma(ch).dest_addr_internal
+            self.write32(
+                ctx,
+                self.dma(ch).dest_addr_internal & !3,
+                data,
+                self.dma(ch).first_access,
+            );
+        } else {
+            let data = self.read16(
+                ctx,
+                self.dma(ch).src_addr_internal & !1,
+                self.dma(ch).first_access,
+            );
+            self.write16(
+                ctx,
+                self.dma(ch).dest_addr_internal & !1,
+                data,
+                self.dma(ch).first_access,
             );
         }
 
-        for i in 0..word_count {
-            if word_len == 4 {
-                let data = self.read32(ctx, self.dma(ch).src_addr_internal & !3, i == 0);
-                self.write32(ctx, self.dma(ch).dest_addr_internal & !3, data, i == 0);
-            } else {
-                let data = self.read16(ctx, self.dma(ch).src_addr_internal & !1, i == 0);
-                self.write16(ctx, self.dma(ch).dest_addr_internal & !1, data, i == 0);
-            }
+        self.dma_mut(ch).first_access = false;
 
-            self.dma_mut(ch).src_addr_internal =
-                self.dma(ch).src_addr_internal.wrapping_add(src_inc);
-            self.dma_mut(ch).dest_addr_internal =
-                self.dma(ch).dest_addr_internal.wrapping_add(dest_inc);
-        }
+        self.dma_mut(ch).step(ctx);
 
-        self.dma_mut(ch).wait_for_exec = false;
-
-        if !self.dma(ch).repeat() {
-            self.dma_mut(ch).dma_enable = false;
-        } else if self.dma(ch).dest_addr_ctrl == 3 {
-            self.dma_mut(ch).dest_addr_internal = self.dma(ch).dest_addr;
-        }
-
-        if self.dma(ch).irq_enable {
-            let kind = match ch {
-                0 => InterruptKind::Dma0,
-                1 => InterruptKind::Dma1,
-                2 => InterruptKind::Dma2,
-                3 => InterruptKind::Dma3,
-                _ => unreachable!(),
-            };
-            ctx.interrupt_mut().set_interrupt(kind);
-        }
-    }
-
-    pub fn read_dma16(&self, addr: u32) -> u16 {
-        match addr {
-            // DMAxSAD
-            0x0B0 | 0x0BC | 0x0C8 | 0x0D4 => 0,
-            0x0B2 | 0x0BE | 0x0CA | 0x0D6 => 0,
-
-            // DMAxDAD
-            0x0B4 | 0x0C0 | 0x0CC | 0x0D8 => 0,
-            0x0B6 | 0x0C2 | 0x0CE | 0x0DA => 0,
-
-            // DMAxCNT
-            0x0B8 | 0x0C4 | 0x0D0 | 0x0DC => 0,
-            0x0BA | 0x0C6 | 0x0D2 | 0x0DE => {
-                let ch = ((addr - 0x0B0) / 0xC) as usize;
-                let dma = self.dma(ch);
-                pack! {
-                    5..=6   => dma.dest_addr_ctrl,
-                    7..=8   => dma.src_addr_ctrl,
-                    9       => dma.repeat,
-                    10      => dma.transfer_type,
-                    11      => dma.game_pak_data_request_transfer,
-                    12..=13 => dma.start_timing,
-                    14      => dma.irq_enable,
-                    15      => dma.dma_enable,
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn write_dma16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
-        match addr {
-            // DMAxSAD
-            0x0B0 | 0x0BC | 0x0C8 | 0x0D4 => {
-                let ch = ((addr - 0x0B0) / 0xC) as usize;
-                self.dma_mut(ch).src_addr.view_bits_mut::<Lsb0>()[0..=15].store(data);
-            }
-            0x0B2 | 0x0BE | 0x0CA | 0x0D6 => {
-                let ch = ((addr - 0x0B0) / 0xC) as usize;
-                let hi = if ch == 0 { 26 } else { 27 };
-                self.dma_mut(ch).src_addr.view_bits_mut::<Lsb0>()[16..=hi].store(data);
-            }
-
-            // DMAxDAD
-            0x0B4 | 0x0C0 | 0x0CC | 0x0D8 => {
-                let ch = ((addr - 0x0B0) / 0xC) as usize;
-                self.dma_mut(ch).dest_addr.view_bits_mut::<Lsb0>()[0..=15].store(data);
-            }
-            0x0B6 | 0x0C2 | 0x0CE | 0x0DA => {
-                let ch = ((addr - 0x0B0) / 0xC) as usize;
-                let hi = if ch != 3 { 26 } else { 27 };
-                self.dma_mut(ch).dest_addr.view_bits_mut::<Lsb0>()[16..=hi].store(data);
-            }
-
-            // DMAxCNT
-            0x0B8 | 0x0C4 | 0x0D0 | 0x0DC => {
-                let ch = ((addr - 0x0B0) / 0xC) as usize;
-                let mask = if ch != 3 { 0x3FFF } else { 0xFFFF };
-                let data = (data & mask) as u32;
-                self.dma_mut(ch).word_count = if data == 0 { mask as u32 + 1 } else { data };
-            }
-            0x0BA | 0x0C6 | 0x0D2 | 0x0DE => {
-                let ch = ((addr - 0x0B0) / 0xC) as usize;
-                let dma = self.dma_mut(ch);
-
-                let v = data.view_bits::<Lsb0>();
-                dma.dest_addr_ctrl = v[5..=6].load();
-                dma.src_addr_ctrl = v[7..=8].load();
-                dma.repeat = v[9];
-                dma.transfer_type = v[10];
-                if ch == 3 {
-                    dma.game_pak_data_request_transfer = v[11];
-                }
-                dma.start_timing = v[12..=13].load();
-                dma.irq_enable = v[14];
-
-                if !dma.dma_enable && v[15] {
-                    // Reload src addr, dest addr and word count
-                    if dma.start_timing == StartTiming::Immediately as u8 {
-                        dma.wait_for_exec = true;
-                    }
-                    dma.src_addr_internal = dma.src_addr;
-                    dma.dest_addr_internal = dma.dest_addr;
-                    dma.word_count_internal = dma.word_count;
-                }
-
-                dma.dma_enable = v[15];
-            }
-            _ => unreachable!(),
-        }
+        true
     }
 }
