@@ -299,6 +299,7 @@ impl<C: Context> Cpu<C> {
     pub fn set_pc(&mut self, ctx: &mut C, pc: u32) {
         self.regs.r[15] = pc;
         self.pc_changed = true;
+        ctx.bus_mut().set_pc(pc);
 
         // adjust cycle for prefetch
         if !self.regs.state {
@@ -308,22 +309,11 @@ impl<C: Context> Cpu<C> {
             let _ = ctx.read16(pc, true);
             let _ = ctx.read16(pc, false);
         }
-        ctx.bus_mut().set_pc(pc);
 
         self.fetch_first = false;
     }
 
     pub fn exec_one(&mut self, ctx: &mut C) {
-        // static mut PREV: u64 = 0;
-        // if ctx.now() - unsafe { PREV } > 10000 {
-        //     unsafe { PREV = ctx.now() };
-        //     trace!("HB: {}", ctx.now());
-        // }
-
-        // if ctx.now() >= 76008322 - 100 {
-        //     self.trace = true;
-        // }
-
         if ctx.interrupt().halt() {
             ctx.elapse(1);
             return;
