@@ -2646,9 +2646,18 @@ fn thumb_op_bx<C: Context, const H: bool>(cpu: &mut Cpu<C>, ctx: &mut C, instr: 
 
     cpu.regs.state = new_pc & 1 != 0;
 
-    // Executing a BX PC in THUMB state from a non-word aligned address
-    // will result in unpredictable execution.
-    cpu.set_pc(ctx, new_pc & !1);
+    if !cpu.regs.state {
+        // Executing a BX PC in THUMB state from a non-word aligned address
+        // will result in unpredictable execution.
+        if new_pc & 2 != 0 {
+            warn!("BX to unaligned PC address: 0x{:08X}", new_pc & !1);
+        }
+
+        // FIXME: but on such cases, new PC seems to be set to PC & !3
+        cpu.set_pc(ctx, new_pc & !3)
+    } else {
+        cpu.set_pc(ctx, new_pc & !1)
+    }
 }
 
 fn thumb_disasm_hireg(instr: u16, _pc: u32) -> String {
