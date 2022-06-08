@@ -57,12 +57,8 @@ pub struct Bus {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct WaitCycles {
-    gamepak_rom_1st_8: [u64; 3],
-    gamepak_rom_1st_16: [u64; 3],
-    gamepak_rom_1st_32: [u64; 3],
-    gamepak_rom_2nd_8: [u64; 3],
-    gamepak_rom_2nd_16: [u64; 3],
-    gamepak_rom_2nd_32: [u64; 3],
+    gamepak_rom_1st: [u64; 3],
+    gamepak_rom_2nd: [u64; 3],
     gamepak_ram_8: u64,
     gamepak_ram_16: u64,
     gamepak_ram_32: u64,
@@ -90,24 +86,13 @@ fn game_pak_rom_wait_cycle(ix: usize, ctrl: usize, first: bool) -> u64 {
 
 impl WaitCycles {
     fn new(game_pak_wait_ctrl: &[u8; 3], game_pak_ram_wait_ctrl: u8) -> WaitCycles {
-        let mut gamepak_rom_1st_8 = [0; 3];
-        let mut gamepak_rom_1st_16 = [0; 3];
-        let mut gamepak_rom_1st_32 = [0; 3];
-
-        let mut gamepak_rom_2nd_8 = [0; 3];
-        let mut gamepak_rom_2nd_16 = [0; 3];
-        let mut gamepak_rom_2nd_32 = [0; 3];
+        let mut gamepak_rom_1st = [0; 3];
+        let mut gamepak_rom_2nd = [0; 3];
 
         for ix in 0..3 {
             let ctrl = game_pak_wait_ctrl[ix] as usize;
-            let wait_1st = game_pak_rom_wait_cycle(ix, ctrl, true);
-            let wait_2nd = game_pak_rom_wait_cycle(ix, ctrl, false);
-            gamepak_rom_1st_8[ix] = wait_1st + 1;
-            gamepak_rom_1st_16[ix] = wait_1st + 1;
-            gamepak_rom_1st_32[ix] = wait_1st + wait_2nd + 2;
-            gamepak_rom_2nd_8[ix] = wait_2nd + 1;
-            gamepak_rom_2nd_16[ix] = wait_2nd + 1;
-            gamepak_rom_2nd_32[ix] = wait_2nd + wait_2nd + 2;
+            gamepak_rom_1st[ix] = game_pak_rom_wait_cycle(ix, ctrl, true);
+            gamepak_rom_2nd[ix] = game_pak_rom_wait_cycle(ix, ctrl, false);
         }
 
         let ram_wait = game_pak_ram_wait_cycle(game_pak_ram_wait_ctrl as usize);
@@ -116,12 +101,8 @@ impl WaitCycles {
         let gamepak_ram_32 = ram_wait * 3 + 3;
 
         WaitCycles {
-            gamepak_rom_1st_8,
-            gamepak_rom_1st_16,
-            gamepak_rom_1st_32,
-            gamepak_rom_2nd_8,
-            gamepak_rom_2nd_16,
-            gamepak_rom_2nd_32,
+            gamepak_rom_1st,
+            gamepak_rom_2nd,
             gamepak_ram_8,
             gamepak_ram_16,
             gamepak_ram_32,
@@ -358,7 +339,10 @@ impl Bus {
                     self.last_successful_bios_read_addr = addr & !3;
                     read32(&self.bios, (addr & !3) as usize)
                 } else {
-                    warn!("Bad BIOS address read: 0x{addr:08X}:32");
+                    warn!(
+                        "Bad BIOS address read: 0x{addr:08X}:32, cycle: {}",
+                        ctx.now()
+                    );
                     let addr = self.last_successful_bios_read_addr + 8;
                     read32(&self.bios, (addr & 0x3FFF) as usize)
                 }
@@ -418,9 +402,9 @@ impl Bus {
         let ws = (addr >> 25) as usize - 4;
 
         let wc = if first {
-            self.wait_cycles.gamepak_rom_1st_16[ws]
+            self.wait_cycles.gamepak_rom_1st[ws]
         } else {
-            self.wait_cycles.gamepak_rom_2nd_16[ws]
+            self.wait_cycles.gamepak_rom_2nd[ws]
         };
 
         if !self.prefetch_buffer {
@@ -430,12 +414,12 @@ impl Bus {
 
             let now = ctx.now();
             let elapsed = now - self.prefetch_start_time;
-            let fetched = elapsed / self.wait_cycles.gamepak_rom_2nd_16[ws];
+            let fetched = elapsed / self.wait_cycles.gamepak_rom_2nd[ws];
             self.prefetched_size = min(8, self.prefetched_size as u64 + fetched) as u32;
             self.prefetch_start_time = if self.prefetched_size == 8 {
                 now
             } else {
-                self.prefetch_start_time + fetched * self.wait_cycles.gamepak_rom_2nd_16[ws]
+                self.prefetch_start_time + fetched * self.wait_cycles.gamepak_rom_2nd[ws]
             };
 
             // FIXME: address overflow
@@ -450,10 +434,10 @@ impl Bus {
             } else {
                 if addr == self.prefetch_base {
                     // trace!("Prefetch miss: time: {now}, addr=0x{addr:08X}, seq");
-                    ctx.elapse(self.wait_cycles.gamepak_rom_2nd_16[ws]);
+                    ctx.elapse(self.wait_cycles.gamepak_rom_2nd[ws]);
                 } else {
                     // trace!("Prefetch miss: time: {now}, addr=0x{addr:08X}, non-seq");
-                    ctx.elapse(self.wait_cycles.gamepak_rom_1st_16[ws]);
+                    ctx.elapse(self.wait_cycles.gamepak_rom_1st[ws]);
                 }
                 self.prefetch_base = addr.wrapping_add(2);
                 self.prefetched_size = 0;
@@ -562,9 +546,9 @@ impl Bus {
             0x8..=0xD => {
                 let ix = (addr >> 25) as usize - 4;
                 ctx.elapse(if first {
-                    self.wait_cycles.gamepak_rom_1st_16[ix]
+                    self.wait_cycles.gamepak_rom_1st[ix]
                 } else {
-                    self.wait_cycles.gamepak_rom_2nd_16[ix]
+                    self.wait_cycles.gamepak_rom_2nd[ix]
                 });
 
                 ctx.gamepak_mut().write(addr, data);
