@@ -5,33 +5,27 @@ use log::{debug, info, trace, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    backup::Backup,
-    context::{Interrupt, Lcd, Sound, SoundDma, Timing},
+    context::{GamePak, Interrupt, Lcd, Sound, SoundDma, Timing},
     dma::Dma,
     interface::KeyInput,
     interrupt::InterruptKind,
     ioreg_info::get_io_reg,
-    rom::Rom,
     serial::Serial,
     timer::Timers,
     util::{pack, read16, read32, trait_alias, write16, write32},
 };
 
-trait_alias!(pub trait Context = Lcd + Sound + Timing + SoundDma + Interrupt);
+trait_alias!(pub trait Context = Lcd + Sound + Timing + SoundDma + GamePak + Interrupt);
 
 #[derive(Serialize, Deserialize)]
 pub struct Bus {
     #[serde(skip)]
     pub bios: Vec<u8>,
-    #[serde(skip)]
-    pub rom: Rom,
 
     #[serde(with = "serde_bytes")]
     ram: Vec<u8>,
     #[serde(with = "serde_bytes")]
     ext_ram: Vec<u8>,
-
-    backup: Backup,
 
     dma: [Dma; 4],
     timers: Timers,
@@ -135,10 +129,9 @@ impl WaitCycles {
 }
 
 impl Bus {
-    pub fn new(bios: Vec<u8>, rom: Rom, backup: Option<Vec<u8>>) -> Self {
+    pub fn new(bios: Vec<u8>) -> Self {
         let ram = vec![0; 0x8000];
         let ext_ram = vec![0; 0x40000];
-        let backup = Backup::detect_backup(&rom.data, backup);
 
         let game_pak_ram_wait_ctrl = 0;
         let game_pak_wait_ctrl = [0; 3];
@@ -149,8 +142,6 @@ impl Bus {
             bios,
             ram,
             ext_ram,
-            rom,
-            backup,
 
             dma: [0, 1, 2, 3].map(|ch| Dma::new(ch)),
             timers: Default::default(),
@@ -210,14 +201,6 @@ impl Bus {
                 ctx.interrupt_mut().set_interrupt(InterruptKind::Keypad);
             }
         }
-    }
-
-    pub fn backup(&self) -> &Backup {
-        &self.backup
-    }
-
-    pub fn backup_mut(&mut self) -> &mut Backup {
-        &mut self.backup
     }
 
     pub fn tick(&mut self, ctx: &mut impl Context) {
@@ -356,7 +339,7 @@ impl Bus {
 
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_16);
-                let lo = self.backup.read_ram(addr & 0xFFFF);
+                let lo = ctx.backup_mut().read_ram(addr & 0xFFFF);
                 (lo as u16) << 8 | lo as u16
             }
 
@@ -425,7 +408,7 @@ impl Bus {
 
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_32);
-                let lo = self.backup.read_ram(addr & 0xFFFF);
+                let lo = ctx.backup_mut().read_ram(addr & 0xFFFF);
                 (lo as u32) << 24 | (lo as u32) << 16 | (lo as u32) << 8 | lo as u32
             }
             _ => {
@@ -443,19 +426,6 @@ impl Bus {
         } else {
             self.wait_cycles.gamepak_rom_2nd_16[ws]
         };
-
-        if self.is_valid_eeprom_addr(addr) {
-            ctx.elapse(wc);
-            return self.backup.read_eeprom() as u16;
-        }
-
-        if (addr as usize & 0x01FFFFFE) >= self.rom.data.len() {
-            ctx.elapse(wc);
-            warn!("Read from invalid Game Pak ROM address: 0x{addr:08X}");
-            return 0;
-        }
-
-        let addr = addr & 0x01FFFFFE;
 
         if !self.prefetch_buffer {
             ctx.elapse(wc);
@@ -495,7 +465,7 @@ impl Bus {
             }
         }
 
-        read16(&self.rom.data, addr as usize)
+        ctx.gamepak_mut().read(addr & 0x01FFFFFE)
     }
 
     pub fn write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8, first: bool) {
@@ -547,7 +517,7 @@ impl Bus {
 
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_8);
-                self.backup.write_ram(addr & 0xFFFF, data);
+                ctx.backup_mut().write_ram(addr & 0xFFFF, data);
             }
             _ => warn!("Write8: Bad segment: 0x{addr:08X} = 0x{data:02X}"),
         }
@@ -601,17 +571,13 @@ impl Bus {
                     self.wait_cycles.gamepak_rom_2nd_16[ix]
                 });
 
-                if self.is_valid_eeprom_addr(addr) {
-                    self.backup.write_eeprom(data & 1 != 0);
-                } else {
-                    warn!("Write to invalid Game Pak ROM address: 0x{addr:08X} = 0x{data:04X}");
-                }
+                ctx.gamepak_mut().write(addr, data);
             }
 
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_16);
-                self.backup.write_ram(addr & 0xFFFF, data as u8);
-                self.backup
+                ctx.backup_mut().write_ram(addr & 0xFFFF, data as u8);
+                ctx.backup_mut()
                     .write_ram((addr + 1) & 0xFFFF, (data >> 8) as u8);
             }
             _ => warn!("Write16: Bad segment: 0x{addr:08X} = 0x{data:04X}"),
@@ -660,12 +626,12 @@ impl Bus {
 
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_32);
-                self.backup.write_ram(addr & 0xFFFF, data as u8);
-                self.backup
+                ctx.backup_mut().write_ram(addr & 0xFFFF, data as u8);
+                ctx.backup_mut()
                     .write_ram((addr + 1) & 0xFFFF, (data >> 8) as u8);
-                self.backup
+                ctx.backup_mut()
                     .write_ram((addr + 2) & 0xFFFF, (data >> 16) as u8);
-                self.backup
+                ctx.backup_mut()
                     .write_ram((addr + 3) & 0xFFFF, (data >> 24) as u8);
             }
             _ => warn!("Write32: Bad segment: 0x{addr:08X} = 0x{data:08X}"),
@@ -878,7 +844,7 @@ impl Bus {
             0x0B0..=0x0DE => {
                 let ch = (addr - 0xB0) / 0xC;
                 self.dma_mut(ch as usize)
-                    .write16(addr - 0xB0 - ch * 0xC, data);
+                    .write16(ctx, addr - 0xB0 - ch * 0xC, data);
             }
             0x0E0..=0x0FE => {}
             0x100..=0x10E => self.timers.write16(addr, data),
@@ -952,15 +918,6 @@ impl Bus {
                 self.io_write8(ctx, addr + 1, (data >> 8) as u8);
             }
         }
-    }
-
-    pub fn is_valid_eeprom_addr(&self, addr: u32) -> bool {
-        if addr & 0x08000000 == 0 {
-            return false;
-        }
-        let ofs = addr & 0x01FFFFFF;
-        let large_rom = self.rom.data.len() > 0x01000000;
-        (!large_rom && ofs & 0x01000000 != 0) || (large_rom && ofs & 0x01FFFF00 == 0x01FFFF00)
     }
 }
 

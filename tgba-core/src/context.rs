@@ -57,6 +57,15 @@ pub trait SoundDma {
 }
 
 #[delegatable_trait]
+pub trait GamePak {
+    fn gamepak(&self) -> &gamepak::GamePak;
+    fn gamepak_mut(&mut self) -> &mut gamepak::GamePak;
+
+    fn backup(&self) -> &backup::Backup;
+    fn backup_mut(&mut self) -> &mut backup::Backup;
+}
+
+#[delegatable_trait]
 pub trait Timing {
     fn now(&self) -> u64;
     fn elapse(&mut self, elapse: u64);
@@ -66,6 +75,7 @@ pub trait Timing {
 #[delegate(Bus, target = "inner")]
 #[delegate(Lcd, target = "inner")]
 #[delegate(Sound, target = "inner")]
+#[delegate(GamePak, target = "inner")]
 #[delegate(Interrupt, target = "inner")]
 #[delegate(Timing, target = "inner")]
 pub struct Context {
@@ -76,9 +86,10 @@ pub struct Context {
 impl Context {
     pub fn new(bios: Vec<u8>, rom: rom::Rom, backup: Option<Vec<u8>>) -> Self {
         let cpu = cpu::Cpu::new();
-        let bus = bus::Bus::new(bios, rom, backup);
+        let bus = bus::Bus::new(bios);
         let lcd = lcd::Lcd::new();
         let sound = sound::Sound::new();
+        let gamepak = gamepak::GamePak::new(rom, backup);
         let interrupt = interrupt::Interrupt::new();
 
         Context {
@@ -88,6 +99,7 @@ impl Context {
                 inner: Inner2 {
                     lcd,
                     sound,
+                    gamepak,
                     inner: Inner3 {
                         interrupt,
                         sound_dma_request: [false, false],
@@ -102,6 +114,7 @@ impl Context {
 #[derive(Delegate, Serialize, Deserialize)]
 #[delegate(Lcd, target = "inner")]
 #[delegate(Sound, target = "inner")]
+#[delegate(GamePak, target = "inner")]
 #[delegate(Interrupt, target = "inner")]
 #[delegate(Timing, target = "inner")]
 pub struct Inner {
@@ -164,6 +177,7 @@ impl Bus for Inner {
 pub struct Inner2 {
     lcd: lcd::Lcd,
     sound: sound::Sound,
+    gamepak: gamepak::GamePak,
     inner: Inner3,
 }
 
@@ -207,6 +221,22 @@ impl Sound for Inner2 {
     }
     fn sound_write(&mut self, addr: u32, data: u8) {
         self.sound.write(&mut self.inner, addr, data)
+    }
+}
+
+impl GamePak for Inner2 {
+    fn gamepak(&self) -> &gamepak::GamePak {
+        &self.gamepak
+    }
+    fn gamepak_mut(&mut self) -> &mut gamepak::GamePak {
+        &mut self.gamepak
+    }
+
+    fn backup(&self) -> &backup::Backup {
+        self.gamepak.backup()
+    }
+    fn backup_mut(&mut self) -> &mut backup::Backup {
+        self.gamepak.backup_mut()
     }
 }
 

@@ -78,13 +78,13 @@ impl Eeprom {
             .collect()
     }
 
-    fn addr_len(&self) -> u32 {
+    fn addr_len(&self) -> Option<u32> {
         if self.data.len() == 512 / 8 {
-            6
+            Some(6)
         } else if self.data.len() == 8 * 1024 / 8 {
-            14
+            Some(14)
         } else {
-            unreachable!()
+            None
         }
     }
 
@@ -138,6 +138,8 @@ impl Eeprom {
             EepromState::WaitForAddr { read, addr, pos } => {
                 *addr |= (data as u32) << *pos;
                 *pos += 1;
+
+                let addr_len = addr_len.unwrap();
 
                 if *pos == addr_len {
                     let addr = if addr_len == 6 { *addr } else { *addr >> 4 };

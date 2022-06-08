@@ -6,12 +6,12 @@ use crate::{
     backup::eeprom::EepromSize,
     bus::Bus,
     consts::{HBLANK_POS, SCREEN_HEIGHT},
-    context::{Interrupt, Lcd, Sound, SoundDma, Timing},
+    context::{GamePak, Interrupt, Lcd, Sound, SoundDma, Timing},
     interrupt::InterruptKind,
     util::{enum_pat, pack, trait_alias, ConstEval},
 };
 
-trait_alias!(pub trait Context = Lcd + Sound + SoundDma + Interrupt + Timing);
+trait_alias!(pub trait Context = Lcd + Sound + SoundDma + GamePak + Interrupt + Timing);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Dma {
@@ -130,6 +130,10 @@ impl Dma {
     }
 
     fn trace(&self) {
+        if self.ch != 3 {
+            return;
+        }
+
         trace!("DMA{}:", self.ch);
         trace!("  - enable: {}", if self.enable { "yes" } else { "no" });
 
@@ -215,7 +219,7 @@ impl Dma {
         }
     }
 
-    pub fn write16(&mut self, addr: u32, data: u16) {
+    pub fn write16<C: GamePak + Lcd>(&mut self, ctx: &mut C, addr: u32, data: u16) {
         match addr {
             // DMAxSAD
             0 => self.src_addr.view_bits_mut::<Lsb0>()[0..=15].store(data),
@@ -248,28 +252,29 @@ impl Dma {
                 }
                 self.start_timing = v[12..=13].load();
                 self.irq_enable = v[14];
+                let old_enable = self.enable;
+                self.enable = v[15];
 
-                if !self.enable && v[15] {
+                if !old_enable && self.enable {
                     // Reload src addr, dest addr and word count
-                    if self.start_timing == StartTiming::Immediately as u8 {
-                        self.start(0, 0);
-                    }
                     self.src_addr_internal = self.src_addr;
                     self.dest_addr_internal = self.dest_addr;
                     self.word_count_internal = self.word_count;
-                }
 
-                self.enable = v[15];
+                    if self.start_timing == StartTiming::Immediately as u8 {
+                        self.start(ctx);
+                    }
+                }
             }
             _ => unreachable!(),
         }
     }
 
-    fn start(&mut self, frame: u64, line: u32) {
+    fn start<C: GamePak + Lcd>(&mut self, ctx: &mut C) {
         self.running = true;
 
-        self.prev_dma_frame = frame;
-        self.prev_dma_line = line;
+        self.prev_dma_frame = ctx.lcd().frame();
+        self.prev_dma_line = ctx.lcd().line();
 
         self.word_len_internal = if self.transfer_type { 4 } else { 2 };
         self.word_count_internal = self.word_count;
@@ -305,18 +310,32 @@ impl Dma {
 
         self.first_access = true;
 
-        if self.src_addr_internal % self.word_len_internal != 0 {
-            warn!("DMA src addr misaligned: 0x{:08X}", self.src_addr_internal);
-        }
-        if self.dest_addr_internal % self.word_len_internal != 0 {
-            warn!(
-                "DMA dest addr misaligned: 0x{:08X}",
-                self.dest_addr_internal
-            );
+        if self.ch == 3
+            && ctx.gamepak().is_valid_eeprom_addr(self.dest_addr_internal)
+            && self.word_len_internal == 2
+        {
+            match self.word_count_internal {
+                9 => ctx.backup_mut().set_eeprom_size(EepromSize::Size512),
+                17 => ctx.backup_mut().set_eeprom_size(EepromSize::Size8K),
+                _ => {}
+            }
         }
 
         if log_enabled!(log::Level::Trace) {
             self.trace();
+        }
+
+        if self.src_addr_internal % self.word_len_internal != 0 {
+            warn!(
+                "DMA{} src addr misaligned: 0x{:08X}",
+                self.ch, self.src_addr_internal
+            );
+        }
+        if self.dest_addr_internal % self.word_len_internal != 0 {
+            warn!(
+                "DMA{} dest addr misaligned: 0x{:08X}",
+                self.ch, self.dest_addr_internal
+            );
         }
     }
 
@@ -359,19 +378,7 @@ impl Bus {
             if !self.dma_mut(ch).check_dma_start(ctx) {
                 return false;
             }
-
-            self.dma_mut(ch).start(ctx.lcd().frame(), ctx.lcd().line());
-
-            if ch == 3
-                && self.is_valid_eeprom_addr(self.dma(ch).dest_addr_internal)
-                && self.dma(ch).word_len_internal == 2
-            {
-                match self.dma(ch).word_count_internal {
-                    9 => self.backup_mut().set_eeprom_size(EepromSize::Size512),
-                    17 => self.backup_mut().set_eeprom_size(EepromSize::Size8K),
-                    c => warn!("Write EEPROM to unknown size with DMA: {c}"),
-                }
-            }
+            self.dma_mut(ch).start(ctx);
         }
 
         // The CPU is paused when DMA transfers are active, however, the CPU is operating during the periods when Sound/Blanking DMA transfers are paused.

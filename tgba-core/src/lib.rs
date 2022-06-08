@@ -1,5 +1,3 @@
-// #![feature(trace_macros)]
-
 mod backup;
 mod bios;
 mod bus;
@@ -7,6 +5,7 @@ mod consts;
 mod context;
 mod cpu;
 mod dma;
+mod gamepak;
 mod interface;
 mod interrupt;
 mod ioreg_info;
@@ -66,8 +65,8 @@ impl Agb {
     }
 
     pub fn backup(&self) -> Option<Vec<u8>> {
-        use context::Bus;
-        self.ctx.bus().backup().data()
+        use context::GamePak;
+        self.ctx.gamepak().backup().data()
     }
 
     pub fn save_state(&self) -> Vec<u8> {
@@ -75,13 +74,16 @@ impl Agb {
     }
 
     pub fn load_state(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        use context::{Bus, Lcd};
+        use context::{Bus, GamePak, Lcd};
         use std::mem::swap;
 
         let mut ctx: Context = bincode::deserialize(data)?;
 
         // Restore unsaved components
-        swap(&mut self.ctx.bus_mut().rom, &mut ctx.bus_mut().rom);
+        swap(
+            self.ctx.gamepak_mut().rom_mut(),
+            ctx.gamepak_mut().rom_mut(),
+        );
         swap(&mut self.ctx.bus_mut().bios, &mut ctx.bus_mut().bios);
         swap(
             &mut self.ctx.lcd_mut().frame_buf,
