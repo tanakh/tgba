@@ -310,7 +310,7 @@ impl Lcd {
             );
 
             if self.y == SCREEN_HEIGHT {
-                debug!("Enter VBLANK: frame:{}, cycle: {}", self.frame, ctx.now());
+                debug!("Enter VBlank: frame:{}, cycle: {}", self.frame, ctx.now());
 
                 if self.vblank_irq_enable {
                     ctx.interrupt_mut().set_interrupt(InterruptKind::VBlank);
