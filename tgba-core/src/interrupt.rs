@@ -106,6 +106,10 @@ impl Interrupt {
     pub fn set_interrupt(&mut self, source: InterruptKind) {
         debug!("Set interrupt: {source:?}");
         self.request |= 1 << source as u16;
+
+        if (self.enable & self.request) != 0 {
+            self.halt = false;
+        }
     }
 
     pub fn halt(&self) -> bool {

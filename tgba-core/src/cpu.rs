@@ -324,8 +324,12 @@ impl<C: Context> Cpu<C> {
         //     self.trace = true;
         // }
 
+        if ctx.interrupt().halt() {
+            ctx.elapse(1);
+            return;
+        }
+
         if !self.regs.fiq_disable && ctx.interrupt().fiq() {
-            ctx.interrupt_mut().set_halt(false);
             self.exception(ctx, Exception::FIQ);
             // FIXME
             ctx.elapse(28);
@@ -333,15 +337,9 @@ impl<C: Context> Cpu<C> {
         }
 
         if !self.regs.irq_disable && ctx.interrupt().irq() {
-            ctx.interrupt_mut().set_halt(false);
             self.exception(ctx, Exception::IRQ);
             // FIXME: correct time
             ctx.elapse(28);
-            return;
-        }
-
-        if ctx.interrupt().halt() {
-            ctx.elapse(1);
             return;
         }
 

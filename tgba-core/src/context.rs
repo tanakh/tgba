@@ -1,4 +1,4 @@
-use crate::{bus, cpu, dma, interrupt, lcd, rom, sound, KeyInput};
+use crate::{backup, bus, cpu, gamepak, interrupt, lcd, rom, sound, KeyInput};
 use ambassador::{delegatable_trait, Delegate};
 use serde::{Deserialize, Serialize};
 
