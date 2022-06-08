@@ -10,7 +10,7 @@ pub struct Interrupt {
     // stop: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum InterruptKind {
     VBlank = 0,
     HBlank = 1,
@@ -54,23 +54,43 @@ impl Interrupt {
     }
 
     pub fn set_enable(&mut self, enable: u16) {
-        use InterruptKind::*;
+        if log::log_enabled!(log::Level::Debug) {
+            use InterruptKind::*;
 
-        debug!("Set interrupt enable:");
-        debug!("  - VBlank:  {}", enable & (1 << VBlank as u32) != 0);
-        debug!("  - HBlank:  {}", enable & (1 << HBlank as u32) != 0);
-        debug!("  - VCount:  {}", enable & (1 << VCount as u32) != 0);
-        debug!("  - Timer0:  {}", enable & (1 << Timer0 as u32) != 0);
-        debug!("  - Timer1:  {}", enable & (1 << Timer1 as u32) != 0);
-        debug!("  - Timer2:  {}", enable & (1 << Timer2 as u32) != 0);
-        debug!("  - Timer3:  {}", enable & (1 << Timer3 as u32) != 0);
-        debug!("  - Serial:  {}", enable & (1 << Serial as u32) != 0);
-        debug!("  - DMA0:    {}", enable & (1 << Dma0 as u32) != 0);
-        debug!("  - DMA1:    {}", enable & (1 << Dma1 as u32) != 0);
-        debug!("  - DMA2:    {}", enable & (1 << Dma2 as u32) != 0);
-        debug!("  - DMA3:    {}", enable & (1 << Dma3 as u32) != 0);
-        debug!("  - Keypad:  {}", enable & (1 << Keypad as u32) != 0);
-        debug!("  - GamePak: {}", enable & (1 << GamePak as u32) != 0);
+            const IRQS: &[(InterruptKind, &str)] = &[
+                (VBlank, "VBlank"),
+                (HBlank, "HBlank"),
+                (VCount, "VCount"),
+                (Timer0, "Timer0"),
+                (Timer1, "Timer1"),
+                (Timer2, "Timer2"),
+                (Timer3, "Timer3"),
+                (Serial, "Serial"),
+                (Dma0, "Dma0"),
+                (Dma1, "Dma1"),
+                (Dma2, "Dma2"),
+                (Dma3, "Dma3"),
+                (Keypad, "Keypad"),
+                (GamePak, "GamePak"),
+            ];
+
+            let mut s = "".to_string();
+
+            let mut first = true;
+
+            for (kind, name) in IRQS {
+                if enable & (1 << *kind as u32) != 0 {
+                    if first {
+                        first = false;
+                    } else {
+                        s += ", ";
+                    }
+                    s += name;
+                }
+            }
+
+            debug!("Set interrupt enable: [{s}]");
+        }
 
         self.enable = enable;
     }
@@ -79,7 +99,7 @@ impl Interrupt {
         self.request
     }
 
-    pub fn reset_request(&mut self, request: u16) {
+    pub fn ack_request(&mut self, request: u16) {
         self.request &= !request;
     }
 
