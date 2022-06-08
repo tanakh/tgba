@@ -785,8 +785,8 @@ impl Bus {
             0x141..=0x14F => {}
 
             // IF
-            0x202 => ctx.interrupt_mut().reset_request(data as u16),
-            0x203 => ctx.interrupt_mut().reset_request((data as u16 & 0x3F) << 8),
+            0x202 => ctx.interrupt_mut().ack_request(data as u16),
+            0x203 => ctx.interrupt_mut().ack_request((data as u16 & 0x3F) << 8),
 
             // IME
             0x208 => ctx.interrupt_mut().set_master_enable((data & 1) != 0),

@@ -412,7 +412,12 @@ impl<C: Context> Cpu<C> {
 
     fn fetch32(&mut self, ctx: &mut impl Context) -> u32 {
         let pc = self.regs.r[15];
-        assert_eq!(pc & 0x3, 0, "Fetch from unaligned address: 0x{pc:08X}");
+        assert_eq!(
+            pc & 0x3,
+            0,
+            "Fetch from unaligned address: 0x{pc:08X}, cycle: {}",
+            ctx.now()
+        );
 
         self.regs.r[15] = self.regs.r[15].wrapping_add(4);
         let fetch_first = self.fetch_first;
@@ -2234,7 +2239,6 @@ fn arm_disasm_swp(instr: u32, _pc: u32) -> String {
 }
 
 fn arm_op_swi<C: Context>(cpu: &mut Cpu<C>, ctx: &mut C, instr: u32) {
-    trace!("Cycle: {}", ctx.now());
     trace_swi(cpu, (instr >> 16) as u8, cpu.regs.r[15].wrapping_sub(8));
     cpu.exception(ctx, Exception::SoftwareInterrupt)
 }
