@@ -28,6 +28,7 @@ pub struct Bus {
     ext_ram: Vec<u8>,
 
     dma: [Dma; 4],
+    pub dma_buf: u32,
     timers: Timers,
 
     key_input: u16,
@@ -126,6 +127,7 @@ impl Bus {
             ext_ram,
 
             dma: [0, 1, 2, 3].map(|ch| Dma::new(ch)),
+            dma_buf: 0,
             timers: Default::default(),
 
             key_input: 0x3FF,
@@ -208,7 +210,7 @@ impl Bus {
 }
 
 impl Bus {
-    pub fn read8(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> u8 {
+    pub fn read8(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> Option<u8> {
         // trace!("Read8: 0x{addr:08X}");
 
         match addr >> 24 {
@@ -216,20 +218,20 @@ impl Bus {
                 ctx.elapse(1);
                 if !self.bios_protect && addr < 0x00004000 {
                     self.last_successful_bios_read_addr = addr & !3;
-                    self.bios[addr as usize]
+                    Some(self.bios[addr as usize])
                 } else {
                     warn!("Illegal BIOS address read: 0x{addr:08X}:8");
-                    let addr = self.last_successful_bios_read_addr + 8 + (addr & 3);
-                    self.bios[addr as usize]
+                    let addr = self.last_successful_bios_read_addr + 4 + (addr & 3);
+                    Some(self.bios[addr as usize])
                 }
             }
             0x2 => {
                 ctx.elapse(3);
-                self.ext_ram[(addr & 0x3FFFF) as usize]
+                Some(self.ext_ram[(addr & 0x3FFFF) as usize])
             }
             0x3 => {
                 ctx.elapse(1);
-                self.ram[(addr & 0x7FFF) as usize]
+                Some(self.ram[(addr & 0x7FFF) as usize])
             }
 
             0x4 => {
@@ -241,35 +243,36 @@ impl Bus {
 
             0x5 => {
                 ctx.elapse(1);
-                ctx.lcd().palette[(addr & 0x3FF) as usize]
+                Some(ctx.lcd().palette[(addr & 0x3FF) as usize])
             }
             0x6 => {
                 ctx.elapse(1);
-                ctx.lcd().vram[vram_addr(addr)]
+                Some(ctx.lcd().vram[vram_addr(addr)])
             }
             0x7 => {
                 ctx.elapse(1);
-                ctx.lcd().oam[(addr & 0x3FF) as usize]
+                Some(ctx.lcd().oam[(addr & 0x3FF) as usize])
             }
 
             0x8..=0xD => {
                 let ofs = addr & 1;
-                (self.read_rom(ctx, addr & !1, first) >> (ofs * 8)) as u8
+                self.read_rom(ctx, addr & !1, first)
+                    .map(|data| (data >> (ofs * 8)) as u8)
             }
 
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_8);
-                ctx.backup_mut().read_ram(addr & 0xFFFF)
+                Some(ctx.backup_mut().read_ram(addr & 0xFFFF))
             }
 
             _ => {
                 warn!("Read8: Bad segment: 0x{addr:08X}");
-                0
+                None
             }
         }
     }
 
-    pub fn read16(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> u16 {
+    pub fn read16(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> Option<u16> {
         // trace!("Read16: 0x{addr:08X}");
 
         match addr >> 24 {
@@ -277,20 +280,20 @@ impl Bus {
                 ctx.elapse(1);
                 if !self.bios_protect && addr < 0x00004000 {
                     self.last_successful_bios_read_addr = addr & !3;
-                    read16(&self.bios, (addr & !1) as usize)
+                    Some(read16(&self.bios, (addr & !1) as usize))
                 } else {
                     warn!("Bad BIOS address read: 0x{addr:08X}:16");
-                    let addr = self.last_successful_bios_read_addr + 8 + (addr & 2);
-                    read16(&self.bios, (addr & 0x3FFE) as usize)
+                    let addr = self.last_successful_bios_read_addr + 4 + (addr & 2);
+                    Some(read16(&self.bios, (addr & 0x3FFE) as usize))
                 }
             }
             0x2 => {
                 ctx.elapse(3);
-                read16(&self.ext_ram, (addr & 0x3FFFE) as usize)
+                Some(read16(&self.ext_ram, (addr & 0x3FFFE) as usize))
             }
             0x3 => {
                 ctx.elapse(1);
-                read16(&self.ram, (addr & 0x7FFE) as usize)
+                Some(read16(&self.ram, (addr & 0x7FFE) as usize))
             }
 
             0x4 => {
@@ -303,15 +306,15 @@ impl Bus {
             // TODO: Plus 1 cycle if GBA accesses video memory at the same time.
             0x5 => {
                 ctx.elapse(1);
-                read16(&ctx.lcd().palette, (addr & 0x3FE) as usize)
+                Some(read16(&ctx.lcd().palette, (addr & 0x3FE) as usize))
             }
             0x6 => {
                 ctx.elapse(1);
-                read16(&ctx.lcd().vram, vram_addr(addr & !1))
+                Some(read16(&ctx.lcd().vram, vram_addr(addr & !1)))
             }
             0x7 => {
                 ctx.elapse(1);
-                read16(&ctx.lcd().oam, (addr & 0x3FE) as usize)
+                Some(read16(&ctx.lcd().oam, (addr & 0x3FE) as usize))
             }
 
             0x8..=0xD => self.read_rom(ctx, addr & !1, first),
@@ -319,17 +322,17 @@ impl Bus {
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_16);
                 let lo = ctx.backup_mut().read_ram(addr & 0xFFFF);
-                (lo as u16) << 8 | lo as u16
+                Some((lo as u16) << 8 | lo as u16)
             }
 
             _ => {
                 warn!("Read16: Bad segment: 0x{addr:08X}");
-                0
+                None
             }
         }
     }
 
-    pub fn read32(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> u32 {
+    pub fn read32(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> Option<u32> {
         // trace!("Read32: 0x{addr:08X}");
 
         match addr >> 24 {
@@ -337,23 +340,24 @@ impl Bus {
                 ctx.elapse(1);
                 if !self.bios_protect && addr < 0x00004000 {
                     self.last_successful_bios_read_addr = addr & !3;
-                    read32(&self.bios, (addr & !3) as usize)
+                    Some(read32(&self.bios, (addr & !3) as usize))
                 } else {
                     warn!(
-                        "Bad BIOS address read: 0x{addr:08X}:32, cycle: {}",
-                        ctx.now()
+                        "Bad BIOS address read: 0x{addr:08X}:32, cycle: {}, prev_success: 0x{:08X}",
+                        ctx.now(),
+                        self.last_successful_bios_read_addr
                     );
-                    let addr = self.last_successful_bios_read_addr + 8;
-                    read32(&self.bios, (addr & 0x3FFF) as usize)
+                    let addr = self.last_successful_bios_read_addr + 4;
+                    Some(read32(&self.bios, (addr & 0x3FFF) as usize))
                 }
             }
             0x2 => {
                 ctx.elapse(6);
-                read32(&self.ext_ram, (addr & 0x3FFFC) as usize)
+                Some(read32(&self.ext_ram, (addr & 0x3FFFC) as usize))
             }
             0x3 => {
                 ctx.elapse(1);
-                read32(&self.ram, (addr & 0x7FFC) as usize)
+                Some(read32(&self.ram, (addr & 0x7FFC) as usize))
             }
 
             0x4 => {
@@ -361,7 +365,8 @@ impl Bus {
                 let addr = addr & 0xFFFC;
                 let lo = self.io_read16(ctx, addr);
                 let hi = self.io_read16(ctx, addr + 2);
-                let data = (hi as u32) << 16 | lo as u32;
+                // FIXME
+                let data = lo.map(|lo| ((hi.unwrap_or(lo) as u32) << 16) | lo as u32);
                 trace_io::<u32, true>(addr, data, ctx.lcd().line());
                 data
             }
@@ -369,36 +374,37 @@ impl Bus {
             // TODO: Plus 1 cycle if GBA accesses video memory at the same time.
             0x5 => {
                 ctx.elapse(2);
-                read32(&ctx.lcd().palette, (addr & 0x3FC) as usize)
+                Some(read32(&ctx.lcd().palette, (addr & 0x3FC) as usize))
             }
             0x6 => {
                 ctx.elapse(2);
-                read32(&ctx.lcd().vram, vram_addr(addr & !3))
+                Some(read32(&ctx.lcd().vram, vram_addr(addr & !3)))
             }
             0x7 => {
                 ctx.elapse(1);
-                read32(&ctx.lcd().oam, (addr & 0x3FC) as usize)
+                Some(read32(&ctx.lcd().oam, (addr & 0x3FC) as usize))
             }
 
             0x8..=0xD => {
                 let lo = self.read_rom(ctx, addr & !3, first);
                 let hi = self.read_rom(ctx, (addr & !3) + 2, false);
-                ((hi as u32) << 16) | lo as u32
+                // FIXME
+                lo.map(|lo| ((hi.unwrap_or(lo) as u32) << 16) | lo as u32)
             }
 
             0xE..=0xF => {
                 ctx.elapse(self.wait_cycles.gamepak_ram_32);
                 let lo = ctx.backup_mut().read_ram(addr & 0xFFFF);
-                (lo as u32) << 24 | (lo as u32) << 16 | (lo as u32) << 8 | lo as u32
+                Some((lo as u32) << 24 | (lo as u32) << 16 | (lo as u32) << 8 | lo as u32)
             }
             _ => {
                 warn!("Read32: Bad segment: 0x{addr:08X}");
-                0
+                None
             }
         }
     }
 
-    fn read_rom(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> u16 {
+    fn read_rom(&mut self, ctx: &mut impl Context, addr: u32, first: bool) -> Option<u16> {
         let ws = (addr >> 25) as usize - 4;
 
         let wc = if first {
@@ -467,7 +473,7 @@ impl Bus {
 
             0x4 => {
                 ctx.elapse(1);
-                trace_io::<u8, false>(addr, data, ctx.lcd().line());
+                trace_io::<u8, false>(addr, Some(data), ctx.lcd().line());
                 self.io_write8(ctx, addr & 0xFFFF, data);
             }
 
@@ -521,7 +527,7 @@ impl Bus {
 
             0x4 => {
                 ctx.elapse(1);
-                trace_io::<u16, false>(addr, data, ctx.lcd().line());
+                trace_io::<u16, false>(addr, Some(data), ctx.lcd().line());
                 self.io_write16(ctx, addr & 0xFFFE, data);
             }
 
@@ -582,7 +588,7 @@ impl Bus {
 
             0x4 => {
                 ctx.elapse(1);
-                trace_io::<u32, false>(addr, data, ctx.lcd().line());
+                trace_io::<u32, false>(addr, Some(data), ctx.lcd().line());
                 let addr = addr & 0xFFFC;
                 self.io_write16(ctx, addr, data as u16);
                 self.io_write16(ctx, addr + 2, (data >> 16) as u16);
@@ -628,29 +634,29 @@ fn vram_addr(addr: u32) -> usize {
 }
 
 impl Bus {
-    pub fn io_read8(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
+    pub fn io_read8(&mut self, ctx: &mut impl Context, addr: u32) -> Option<u8> {
         match addr {
             0x000..=0x05E => ctx.lcd_read(addr),
             0x060..=0x0AF => ctx.sound_read(addr),
 
             _ => {
                 let data = self.io_read16(ctx, addr & !1);
-                (data >> ((addr & 1) * 8)) as u8
+                data.map(|data| (data >> ((addr & 1) * 8)) as u8)
             }
         }
     }
 
-    pub fn io_read16(&mut self, ctx: &mut impl Context, addr: u32) -> u16 {
-        match addr {
+    pub fn io_read16(&mut self, ctx: &mut impl Context, addr: u32) -> Option<u16> {
+        Some(match addr {
             0x000..=0x05E => {
                 let lo = ctx.lcd_read(addr);
                 let hi = ctx.lcd_read(addr + 1);
-                (hi as u16) << 8 | lo as u16
+                return lo.map(|lo| (hi.unwrap_or(lo) as u16) << 8 | lo as u16);
             }
             0x060..=0x0AE => {
                 let lo = ctx.sound_read(addr);
                 let hi = ctx.sound_read(addr + 1);
-                (hi as u16) << 8 | lo as u16
+                return lo.map(|lo| (hi.unwrap_or(lo) as u16) << 8 | lo as u16);
             }
 
             0x0B0..=0x0DE => {
@@ -658,7 +664,7 @@ impl Bus {
                 self.dma(ch as usize).read16(addr - 0xB0 - ch * 0xC)
             }
 
-            0x0E0..=0x0FE => 0,
+            0x0E0..=0x0FE => return None,
             0x100..=0x10E => self.timers.read16(addr),
 
             0x120..=0x126 => {
@@ -721,18 +727,17 @@ impl Bus {
             // POSTFLG
             0x300 => self.post_boot as u16,
 
-            0x100C => 0,
-
-            0xF600..=0xFFFE => 0,
+            0x100C => return None,
+            0xF600..=0xFFFE => return None,
 
             _ => {
                 warn!(
                     "IO read: 0x{addr:03X}:16 ({})",
                     get_io_reg(addr).map_or("N/A", |r| r.name)
                 );
-                0
+                return None;
             }
-        }
+        })
     }
 
     pub fn io_write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8) {
@@ -901,7 +906,7 @@ impl Bus {
     }
 }
 
-fn trace_io<T: UpperHex, const READ: bool>(addr: u32, data: T, line: u32) {
+fn trace_io<T: UpperHex, const READ: bool>(addr: u32, data: Option<T>, line: u32) {
     let addr = addr & 0xFFFF;
 
     if !log::log_enabled!(log::Level::Trace) {
@@ -910,12 +915,17 @@ fn trace_io<T: UpperHex, const READ: bool>(addr: u32, data: T, line: u32) {
 
     let size = size_of::<T>() * 8;
 
-    let data = if size == 8 {
-        format!("{data:02X}")
-    } else if size == 16 {
-        format!("{data:04X}")
-    } else {
-        format!("{data:08X}")
+    let data = match data {
+        Some(data) => {
+            if size == 8 {
+                format!("{data:02X}")
+            } else if size == 16 {
+                format!("{data:04X}")
+            } else {
+                format!("{data:08X}")
+            }
+        }
+        None => "N/A".to_string(),
     };
 
     let annot = if let Some(reg) = get_io_reg(addr) {

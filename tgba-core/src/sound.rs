@@ -1,7 +1,7 @@
 use std::{cmp::min, collections::VecDeque};
 
 use bitvec::prelude::*;
-use log::{debug, warn};
+use log::warn;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -932,8 +932,8 @@ impl DirectSound {
 }
 
 impl Sound {
-    pub fn read(&mut self, ctx: &mut impl Context, addr: u32) -> u8 {
-        let data = match addr {
+    pub fn read(&mut self, ctx: &mut impl Context, addr: u32) -> Option<u8> {
+        Some(match addr {
             0x060 => self.pulse[0].read(0),
             0x061 => 0,
             0x062 => self.pulse[0].read(1),
@@ -1008,7 +1008,7 @@ impl Sound {
                 1 => self.pulse[1].on,
                 0 => self.pulse[0].on,
             },
-            0x085..=0x087 => 0,
+            0x085..=0x087 => return None,
 
             // SOUNDBIAS
             0x088 => self.bias_level as u8,
@@ -1017,17 +1017,15 @@ impl Sound {
                 6..=7 => self.amplitude_resolution,
             },
 
-            0x08A..=0x08F => 0,
+            0x08A..=0x08F => return None,
 
             // Waveform RAM
             0x090..=0x09F => self.wave.read_ram(addr & 0xF),
 
-            0x0A0..=0x0AF => 0,
+            0x0A0..=0x0AF => return None,
 
             _ => unreachable!(),
-        };
-
-        data
+        })
     }
 
     pub fn write(&mut self, ctx: &mut impl Context, addr: u32, data: u8) {

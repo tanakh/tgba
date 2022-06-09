@@ -36,17 +36,17 @@ impl GamePak {
         (!large_rom && addr & 0x01000000 != 0) || (large_rom && addr & 0x01FFFF00 == 0x01FFFF00)
     }
 
-    pub fn read(&mut self, addr: u32) -> u16 {
+    pub fn read(&mut self, addr: u32) -> Option<u16> {
         if self.is_valid_eeprom_addr(addr) {
-            return self.backup.read_eeprom() as u16;
+            return Some(self.backup.read_eeprom() as u16);
         }
 
         if (addr as usize & 0x01FFFFFE) >= self.rom.data.len() {
             warn!("Read from invalid Game Pak ROM address: 0x{addr:08X}");
-            return 0;
+            return None;
         }
 
-        read16(&self.rom.data, addr as usize)
+        Some(read16(&self.rom.data, addr as usize))
     }
 
     pub fn write(&mut self, addr: u32, data: u16) {

@@ -397,10 +397,15 @@ impl Bus {
                 self.dma(ch).src_addr_internal & !3,
                 self.dma(ch).first_access,
             );
+
+            if let Some(data) = data {
+                self.dma_buf = data;
+            }
+
             self.write32(
                 ctx,
                 self.dma(ch).dest_addr_internal & !3,
-                data,
+                self.dma_buf,
                 self.dma(ch).first_access,
             );
         } else {
@@ -409,10 +414,15 @@ impl Bus {
                 self.dma(ch).src_addr_internal & !1,
                 self.dma(ch).first_access,
             );
+
+            if let Some(data) = data {
+                self.dma_buf = (data as u32) << 16 | data as u32;
+            }
+
             self.write16(
                 ctx,
                 self.dma(ch).dest_addr_internal & !1,
-                data,
+                self.dma_buf as u16,
                 self.dma(ch).first_access,
             );
         }

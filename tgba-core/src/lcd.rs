@@ -1,7 +1,7 @@
 use std::cmp::min;
 
 use bitvec::prelude::*;
-use log::{debug, trace};
+use log::{info, trace};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -270,12 +270,7 @@ impl Lcd {
         self.x += 1;
 
         if self.x == HBLANK_POS {
-            trace!(
-                "Enter HBLANK: frame:{}, y:{:03}, cycle: {}",
-                self.frame,
-                self.y,
-                ctx.now()
-            );
+            info!("Enter HBLANK: frame:{}, y:{:03}", self.frame, self.y,);
 
             // Note that no H-Blank interrupts are generated within V-Blank period.
             if self.hblank_irq_enable {
@@ -310,7 +305,7 @@ impl Lcd {
             );
 
             if self.y == SCREEN_HEIGHT {
-                debug!("Enter VBlank: frame:{}, cycle: {}", self.frame, ctx.now());
+                info!("Enter VBlank: frame:{}", self.frame);
 
                 if self.vblank_irq_enable {
                     ctx.interrupt_mut().set_interrupt(InterruptKind::VBlank);
@@ -323,8 +318,8 @@ impl Lcd {
         }
     }
 
-    pub fn read(&mut self, _ctx: &mut impl Context, addr: u32) -> u8 {
-        match addr {
+    pub fn read(&mut self, _ctx: &mut impl Context, addr: u32) -> Option<u8> {
+        Some(match addr {
             // DISPCNT
             0x000 => pack! {
                 0..=2 => self.bg_mode,
@@ -343,7 +338,7 @@ impl Lcd {
                 6 => self.display_window[1],
                 7 => self.display_obj_window,
             },
-            0x002 | 0x003 => 0,
+            0x002 | 0x003 => return None,
 
             // DISPSTAT
             0x004 => pack! {
@@ -380,7 +375,7 @@ impl Lcd {
                 }
             }
 
-            0x010..=0x047 => 0,
+            0x010..=0x047 => return None,
 
             // WININ / WINOUT
             0x048..=0x04B => {
@@ -401,7 +396,7 @@ impl Lcd {
                 }
             }
 
-            0x04C..=0x4F => 0,
+            0x04C..=0x4F => return None,
 
             // BLDCNT
             0x050 => pack! {
@@ -414,10 +409,10 @@ impl Lcd {
             0x052 => self.blend_ctrl.eva,
             0x053 => self.blend_ctrl.evb,
 
-            0x054..=0x05F => 0,
+            0x054..=0x05F => return None,
 
-            _ => unreachable!("{addr:03X}"),
-        }
+            _ => unreachable!(),
+        })
     }
 
     pub fn write(&mut self, _ctx: &mut impl Context, addr: u32, data: u8) {
@@ -626,7 +621,7 @@ impl Lcd {
 
             0x055..=0x05F => {}
 
-            _ => unreachable!("0x{addr:03X}"),
+            _ => unreachable!(),
         }
     }
 }

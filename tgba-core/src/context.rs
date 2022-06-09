@@ -7,9 +7,9 @@ pub trait Bus {
     fn bus(&self) -> &bus::Bus;
     fn bus_mut(&mut self) -> &mut bus::Bus;
 
-    fn read8(&mut self, addr: u32, first: bool) -> u8;
-    fn read16(&mut self, addr: u32, first: bool) -> u16;
-    fn read32(&mut self, addr: u32, first: bool) -> u32;
+    fn read8(&mut self, addr: u32, first: bool) -> Option<u8>;
+    fn read16(&mut self, addr: u32, first: bool) -> Option<u16>;
+    fn read32(&mut self, addr: u32, first: bool) -> Option<u32>;
 
     fn write8(&mut self, addr: u32, data: u8, first: bool);
     fn write16(&mut self, addr: u32, data: u16, first: bool);
@@ -28,7 +28,7 @@ pub trait Lcd {
 
     fn lcd_tick(&mut self);
 
-    fn lcd_read(&mut self, addr: u32) -> u8;
+    fn lcd_read(&mut self, addr: u32) -> Option<u8>;
     fn lcd_write(&mut self, addr: u32, data: u8);
 }
 
@@ -40,7 +40,7 @@ pub trait Sound {
     fn sound_tick(&mut self);
     fn sound_timer_overflow(&mut self, ch: u8);
 
-    fn sound_read(&mut self, addr: u32) -> u8;
+    fn sound_read(&mut self, addr: u32) -> Option<u8>;
     fn sound_write(&mut self, addr: u32, data: u8);
 }
 
@@ -137,13 +137,13 @@ impl Bus for Inner {
         &mut self.bus
     }
 
-    fn read8(&mut self, addr: u32, first: bool) -> u8 {
+    fn read8(&mut self, addr: u32, first: bool) -> Option<u8> {
         self.bus.read8(&mut self.inner, addr, first)
     }
-    fn read16(&mut self, addr: u32, first: bool) -> u16 {
+    fn read16(&mut self, addr: u32, first: bool) -> Option<u16> {
         self.bus.read16(&mut self.inner, addr, first)
     }
-    fn read32(&mut self, addr: u32, first: bool) -> u32 {
+    fn read32(&mut self, addr: u32, first: bool) -> Option<u32> {
         self.bus.read32(&mut self.inner, addr, first)
     }
 
@@ -193,7 +193,7 @@ impl Lcd for Inner2 {
         self.lcd.tick(&mut self.inner);
     }
 
-    fn lcd_read(&mut self, addr: u32) -> u8 {
+    fn lcd_read(&mut self, addr: u32) -> Option<u8> {
         self.lcd.read(&mut self.inner, addr)
     }
     fn lcd_write(&mut self, addr: u32, data: u8) {
@@ -216,7 +216,7 @@ impl Sound for Inner2 {
         self.sound.timer_overflow(&mut self.inner, ch);
     }
 
-    fn sound_read(&mut self, addr: u32) -> u8 {
+    fn sound_read(&mut self, addr: u32) -> Option<u8> {
         self.sound.read(&mut self.inner, addr)
     }
     fn sound_write(&mut self, addr: u32, data: u8) {

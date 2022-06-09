@@ -28,9 +28,9 @@ pub struct Agb {
 
 impl Agb {
     pub fn new(bios: Vec<u8>, rom: Rom, backup: Option<Vec<u8>>) -> Self {
-        Agb {
-            ctx: Context::new(bios, rom, backup),
-        }
+        let mut ctx = Context::new(bios, rom, backup);
+        ctx.cpu.set_pc(&mut ctx.inner, 0);
+        Agb { ctx }
     }
 
     pub fn run_frame(&mut self) {
