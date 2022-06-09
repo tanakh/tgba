@@ -1292,7 +1292,7 @@ impl Lcd {
                 &self.winin[0]
             } else if in_win1 {
                 &self.winin[1]
-            } else if self.line_buf.obj_attr[x as usize].window() {
+            } else if self.display_obj_window && self.line_buf.obj_attr[x as usize].window() {
                 &self.objwin
             } else if winout_enable {
                 &self.winout
