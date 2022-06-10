@@ -638,6 +638,7 @@ impl Bus {
         match addr {
             0x000..=0x05E => ctx.lcd_read(addr),
             0x060..=0x0AF => ctx.sound_read(addr),
+            0x120..=0x12E | 0x134..=0x15F => self.sio.read(addr),
 
             _ => {
                 let data = self.io_read16(ctx, addr & !1);
@@ -658,6 +659,11 @@ impl Bus {
                 let hi = ctx.sound_read(addr + 1);
                 return lo.map(|lo| (hi.unwrap_or(lo) as u16) << 8 | lo as u16);
             }
+            0x120..=0x12E | 0x134..=0x15E => {
+                let lo = self.sio.read(addr);
+                let hi = self.sio.read(addr + 1);
+                return lo.map(|lo| (hi.unwrap_or(lo) as u16) << 8 | lo as u16);
+            }
 
             0x0B0..=0x0DE => {
                 let ch = (addr - 0xB0) / 0xC;
@@ -666,23 +672,6 @@ impl Bus {
 
             0x0E0..=0x0FE => return None,
             0x100..=0x10E => self.timers.read16(addr),
-
-            0x120..=0x126 => {
-                warn!("Read SIOMULTI");
-                0
-            }
-
-            // SIOCNT
-            0x128 => {
-                // TODO
-                warn!("Read SIOCNT");
-                0
-            }
-            // SIODATA
-            0x12A => {
-                warn!("Read SIODATA8");
-                0
-            }
 
             // KEYINPUT
             0x130 => self.key_input,
@@ -693,16 +682,6 @@ impl Bus {
                 14    => self.key_interrupt_enable,
                 15    => self.key_interrupt_cond,
             },
-
-            // RCNT
-            0x134 => {
-                warn!("Read RCNT");
-                0
-            }
-
-            // JOY_RECV
-            0x150 => 0,
-            0x152 => 0,
 
             // IE
             0x200 => ctx.interrupt().enable(),
@@ -744,34 +723,7 @@ impl Bus {
         match addr {
             0x000..=0x05F => ctx.lcd_write(addr, data),
             0x060..=0x0AF => ctx.sound_write(addr, data),
-
-            // SIODATA
-            0x120..=0x127 => {
-                let i = (addr - 0x120) as usize;
-                warn!("SIODATA[{i}] = 0x{data:02X}");
-            }
-
-            // SIOCNT
-            0x128 | 0x129 => {
-                let i = (addr - 0x128) as usize;
-                warn!("SIOCNT[{i}] = 0x{data:02X}");
-            }
-
-            // SIODATA8
-            0x12A => self.sio.data8 = data as u8,
-            0x12B..=0x12F => {}
-
-            // RCNT
-            0x134 | 0x135 => {
-                let ofs = addr - 0x134;
-                info!("RCNT:{ofs} = 0x{data:02X}");
-            }
-
-            // JOYCNT
-            0x140 => {
-                info!("JOYCNT = 0x{data:02X}");
-            }
-            0x141..=0x14F => {}
+            0x120..=0x12E | 0x134..=0x15F => self.sio.write(addr, data),
 
             // IF
             0x202 => ctx.interrupt_mut().ack_request(data as u16),
@@ -818,14 +770,6 @@ impl Bus {
 
     pub fn io_write16(&mut self, ctx: &mut impl Context, addr: u32, data: u16) {
         match addr {
-            0x000..=0x05E => {
-                ctx.lcd_write(addr, data as u8);
-                ctx.lcd_write(addr + 1, (data >> 8) as u8);
-            }
-            0x060..=0x0AE => {
-                ctx.sound_write(addr, data as u8);
-                ctx.sound_write(addr + 1, (data >> 8) as u8);
-            }
             0x0B0..=0x0DE => {
                 let ch = (addr - 0xB0) / 0xC;
                 self.dma_mut(ch as usize)
@@ -845,33 +789,7 @@ impl Bus {
                 self.key_interrupt_cond = data[15];
             }
 
-            // JOY_RECV_L
-            0x150 => {
-                info!("JOY_RECV_L = 0x{data:04X}");
-            }
-            // JOY_RECV_H
-            0x152 => {
-                info!("JOY_RECV_H = 0x{data:04X}");
-            }
-            // JOY_TRANS_L
-            0x154 => {
-                info!("JOY_TRANS_L = 0x{data:04X}");
-            }
-            // JOY_TRANS_H
-            0x156 => {
-                info!("JOY_TRANS_H = 0x{data:04X}");
-            }
-            // JOYSTAT
-            0x158 => {
-                info!("JOYSTAT = 0x{data:04X}");
-            }
-            0x15A..=0x15E => {}
-
             0x200 => ctx.interrupt_mut().set_enable(data & 0x3FFF),
-            0x202 => {
-                self.io_write8(ctx, addr, data as u8);
-                self.io_write8(ctx, addr + 1, (data >> 8) as u8);
-            }
 
             // Game Pak Memory Wait Control
             0x204 => {
