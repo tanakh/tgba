@@ -754,9 +754,13 @@ impl Lcd {
 
             if !self.bg[i].color_mode {
                 // 16 x 16 color mode
-                assert!(char_base_addr + char * 32 + oy * 4 + ox / 2 < self.vram.len(), "too large index: char_base: {char_base_addr:08X}, char: 0x{char:03X}, ox: {ox}, oy: {oy}, b0: 0x{b0:02X}, b1: 0x{b1:02X}");
 
-                let tmp = self.vram[char_base_addr + char * 32 + oy * 4 + ox / 2];
+                // assert!(char_base_addr + char * 32 + oy * 4 + ox / 2 < self.vram.len(), "too large index: char_base: {char_base_addr:08X}, char: 0x{char:03X}, ox: {ox}, oy: {oy}, b0: 0x{b0:02X}, b1: 0x{b1:02X}");
+
+                // FIXME: is this correct?
+                let char_addr = (char_base_addr + char * 32) & 0xFFFF;
+
+                let tmp = self.vram[char_addr + oy * 4 + ox / 2];
                 let col = (tmp >> ((ox & 1) * 4)) & 0xF;
                 if col != 0 {
                     self.line_buf.bg[i][x as usize] = self.bg_palette16(palette as _, col as _);
@@ -764,9 +768,12 @@ impl Lcd {
             } else {
                 // 256 x 1 color mode
 
-                assert!(char_base_addr + char * 64 + oy * 8 + ox < self.vram.len(), "too large index: char_base: {char_base_addr:08X}, char: 0x{char:03X}, ox: {ox}, oy: {oy}, b0: 0x{b0:02X}, b1: 0x{b1:02X}");
+                // assert!(char_base_addr + char * 64 + oy * 8 + ox < self.vram.len(), "too large index: char_base: {char_base_addr:08X}, char: 0x{char:03X}, ox: {ox}, oy: {oy}, b0: 0x{b0:02X}, b1: 0x{b1:02X}");
 
-                let col = self.vram[char_base_addr + char * 64 + oy * 8 + ox];
+                // FIXME: is this correct?
+                let char_addr = (char_base_addr + char * 64) & 0xFFFF;
+
+                let col = self.vram[char_addr + oy * 8 + ox];
                 if col != 0 {
                     self.line_buf.bg[i][x as usize] = self.bg_palette256(col as _);
                 }
