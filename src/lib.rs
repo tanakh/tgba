@@ -110,7 +110,7 @@ pub fn run(bios: &Path, rom_path: &Path) -> Result<()> {
 
         let key_input = im.key_input();
         agb.set_key_input(&key_input);
-        agb.run_frame();
+        agb.exec_frame();
 
         let frame_buf = agb.frame_buf();
 

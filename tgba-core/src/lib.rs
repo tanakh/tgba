@@ -33,7 +33,17 @@ impl Agb {
         Agb { ctx }
     }
 
-    pub fn run_frame(&mut self) {
+    pub fn reset(&mut self) {
+        use context::{Bus, GamePak};
+
+        let bios = self.ctx.bus().bios.clone();
+        let rom = self.ctx.gamepak().rom().clone();
+        let backup = self.ctx.backup().data();
+
+        self.ctx = Context::new(bios, rom, backup);
+    }
+
+    pub fn exec_frame(&mut self) {
         use context::{Bus, Lcd, Sound};
 
         self.ctx.sound_mut().clear_buf();
