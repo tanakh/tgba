@@ -33,6 +33,38 @@ impl Agb {
         Agb { ctx }
     }
 
+    pub fn info(&self) -> Vec<(String, String)> {
+        use context::GamePak;
+        let rom = self.ctx.gamepak().rom();
+
+        let rom_size = rom.data.len();
+        let rom_size = if rom_size < 1 * 1024 * 1024 {
+            format!("{} KiB", rom_size as f64 / 1024 as f64)
+        } else {
+            format!("{} MiB", rom_size as f64 / (1024 * 1024) as f64)
+        };
+
+        vec![
+            (
+                "Title".to_string(),
+                String::from_utf8_lossy(&rom.title).to_string(),
+            ),
+            (
+                "Game Code".to_string(),
+                String::from_utf8_lossy(&rom.game_code).to_string(),
+            ),
+            (
+                "Maker Code".to_string(),
+                String::from_utf8_lossy(&rom.maker_code).to_string(),
+            ),
+            ("Main Unit Code".to_string(), rom.main_unit_code.to_string()),
+            ("Device Type".to_string(), rom.device_type.to_string()),
+            ("ROM Version".to_string(), rom.rom_version.to_string()),
+            ("Backup Type".to_string(), rom.backup_type().to_string()),
+            ("ROM Size".to_string(), rom_size),
+        ]
+    }
+
     pub fn reset(&mut self) {
         use context::{Bus, GamePak};
 
