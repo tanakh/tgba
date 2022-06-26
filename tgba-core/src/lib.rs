@@ -75,10 +75,11 @@ impl Agb {
         self.ctx = Context::new(bios, rom, backup);
     }
 
-    pub fn exec_frame(&mut self) {
+    pub fn exec_frame(&mut self, render_graphics: bool) {
         use context::{Bus, Lcd, Sound};
 
         self.ctx.sound_mut().clear_buf();
+        self.ctx.lcd_mut().set_render_graphics(render_graphics);
 
         let start_frame = self.ctx.lcd().frame();
         while start_frame == self.ctx.lcd().frame() {
