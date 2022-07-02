@@ -33,17 +33,53 @@ impl Agb {
         Agb { ctx }
     }
 
-    pub fn ctx(&self) -> &Context {
-        &self.ctx
+    pub fn info(&self) -> Vec<(String, String)> {
+        use context::GamePak;
+        let rom = self.ctx.gamepak().rom();
+
+        let rom_size = rom.data.len();
+        let rom_size = if rom_size < 1 * 1024 * 1024 {
+            format!("{} KiB", rom_size as f64 / 1024 as f64)
+        } else {
+            format!("{} MiB", rom_size as f64 / (1024 * 1024) as f64)
+        };
+
+        vec![
+            (
+                "Title".to_string(),
+                String::from_utf8_lossy(&rom.title).to_string(),
+            ),
+            (
+                "Game Code".to_string(),
+                String::from_utf8_lossy(&rom.game_code).to_string(),
+            ),
+            (
+                "Maker Code".to_string(),
+                String::from_utf8_lossy(&rom.maker_code).to_string(),
+            ),
+            ("Main Unit Code".to_string(), rom.main_unit_code.to_string()),
+            ("Device Type".to_string(), rom.device_type.to_string()),
+            ("ROM Version".to_string(), rom.rom_version.to_string()),
+            ("Backup Type".to_string(), rom.backup_type().to_string()),
+            ("ROM Size".to_string(), rom_size),
+        ]
     }
 
-    pub fn ctx_mut(&mut self) -> &mut Context {
-        &mut self.ctx
+    pub fn reset(&mut self) {
+        use context::{Bus, GamePak};
+
+        let bios = self.ctx.bus().bios.clone();
+        let rom = self.ctx.gamepak().rom().clone();
+        let backup = self.ctx.backup().data();
+
+        self.ctx = Context::new(bios, rom, backup);
     }
 
-    pub fn run_frame(&mut self) {
+    pub fn exec_frame(&mut self, render_graphics: bool) {
         use context::{Bus, Lcd, Sound};
 
+        self.ctx.sound_mut().clear_buf();
+        self.ctx.lcd_mut().set_render_graphics(render_graphics);
         self.ctx.sound_mut().clear_buf();
 
         let start_frame = self.ctx.lcd().frame();
@@ -55,6 +91,14 @@ impl Agb {
             self.ctx.sound_tick();
             self.ctx.bus_tick();
         }
+    }
+
+    pub fn ctx(&self) -> &Context {
+        &self.ctx
+    }
+
+    pub fn ctx_mut(&mut self) -> &mut Context {
+        &mut self.ctx
     }
 
     pub fn frame_buf(&self) -> &FrameBuf {

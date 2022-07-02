@@ -60,6 +60,9 @@ pub struct Lcd {
     frame: u64,
 
     #[serde(skip)]
+    render_graphics: bool,
+
+    #[serde(skip)]
     line_buf: LineBuf,
     #[serde(skip)]
     pub frame_buf: FrameBuf,
@@ -247,6 +250,10 @@ impl Lcd {
 
     pub fn x(&self) -> u32 {
         self.x
+    }
+
+    pub fn set_render_graphics(&mut self, render_graphics: bool) {
+        self.render_graphics = render_graphics;
     }
 
     pub fn frame_buf(&self) -> &FrameBuf {
@@ -630,6 +637,10 @@ const OBJ_BASE_ADDR: u32 = 0x10000;
 
 impl Lcd {
     fn render_line(&mut self) {
+        if !self.render_graphics {
+            return;
+        }
+
         if self.force_blank {
             for x in 0..SCREEN_WIDTH {
                 *self.frame_buf.pixel_mut(x, self.y) = Pixel::new(255, 255, 255);

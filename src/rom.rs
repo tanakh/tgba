@@ -3,7 +3,7 @@ use log::error;
 
 use crate::backup::Backup;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Rom {
     pub data: Vec<u8>,
     pub title: Vec<u8>,
