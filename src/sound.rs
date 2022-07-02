@@ -125,7 +125,7 @@ impl Sound {
         }
     }
 
-    fn tick_1m(&mut self, ctx: &mut impl Context) {
+    fn tick_1m(&mut self, _ctx: &mut impl Context) {
         if self.power_on {
             self.frame_counter += 1;
 
@@ -932,7 +932,7 @@ impl DirectSound {
 }
 
 impl Sound {
-    pub fn read(&mut self, ctx: &mut impl Context, addr: u32) -> Option<u8> {
+    pub fn read(&mut self, _ctx: &mut impl Context, addr: u32) -> Option<u8> {
         Some(match addr {
             0x060 => self.pulse[0].read(0),
             0x061 => 0,
@@ -1028,7 +1028,7 @@ impl Sound {
         })
     }
 
-    pub fn write(&mut self, ctx: &mut impl Context, addr: u32, data: u8) {
+    pub fn write(&mut self, _ctx: &mut impl Context, addr: u32, data: u8) {
         match addr {
             0x060 => self.pulse[0].write(0, data),
             0x061 => {}

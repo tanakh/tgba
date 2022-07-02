@@ -1,7 +1,7 @@
 use std::{cmp::min, fmt::UpperHex, mem::size_of};
 
 use bitvec::prelude::*;
-use log::{debug, info, trace, warn};
+use log::{debug, trace, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::{

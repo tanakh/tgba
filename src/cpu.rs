@@ -308,14 +308,6 @@ impl<C: Context> Cpu<C> {
     }
 
     pub fn exec_one(&mut self, ctx: &mut C) {
-        // if ctx.now() > 989_000_000 {
-        //     self.trace = true;
-        // }
-
-        // if self.regs.r[15] == 0x0800432A {
-        //     self.trace = true;
-        // }
-
         if ctx.interrupt().halt() {
             ctx.elapse(1);
             return;
