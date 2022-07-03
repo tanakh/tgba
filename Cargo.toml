@@ -2,6 +2,14 @@
 name = "tgba"
 version = "0.1.0"
 edition = "2021"
+authors = ["Hideyuki Tanaka <tanaka.hideyuki@gmail.com>"]
+license = "MIT"
+
+description = "Game Boy Advance emulator"
+repository = "https://github.com/tanakh/tgba"
+readme = "README.md"
+categories = ["emulators"]
+keywords = ["emulators"]
 
 [dependencies]
 ambassador = "0.3.1"
