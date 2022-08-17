@@ -723,6 +723,7 @@ impl Bus {
         match addr {
             0x000..=0x05F => ctx.lcd_write(addr, data),
             0x060..=0x0AF => ctx.sound_write(addr, data),
+            0x100..=0x10E => self.timers.write16(addr, data as u16),
             0x120..=0x12E | 0x134..=0x15F => self.sio.write(addr, data),
 
             // IF
