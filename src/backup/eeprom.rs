@@ -41,16 +41,16 @@ impl Eeprom {
         }
     }
 
-    pub fn size(&self) -> Option<EepromSize> {
-        let bits = self.data.len() * 8;
-        if bits == 512 {
-            Some(EepromSize::Size512)
-        } else if bits == 8192 {
-            Some(EepromSize::Size8K)
-        } else {
-            None
-        }
-    }
+    // pub fn size(&self) -> Option<EepromSize> {
+    //     let bits = self.data.len() * 8;
+    //     if bits == 512 {
+    //         Some(EepromSize::Size512)
+    //     } else if bits == 8192 {
+    //         Some(EepromSize::Size8K)
+    //     } else {
+    //         None
+    //     }
+    // }
 
     pub fn set_size(&mut self, size: EepromSize) {
         let words = match size {

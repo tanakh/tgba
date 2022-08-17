@@ -53,6 +53,7 @@ impl<C: Context> Default for OpTables<C> {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum Exception {
     Reset,
     UndefinedInstruction,

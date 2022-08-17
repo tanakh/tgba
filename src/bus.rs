@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     context::{GamePak, Interrupt, Lcd, Sound, SoundDma, Timing},
     dma::Dma,
-    interface::KeyInput,
     interrupt::InterruptKind,
     ioreg_info::get_io_reg,
     serial::Serial,
@@ -54,6 +53,20 @@ pub struct Bus {
     prefetch_start_time: u64,
 
     wait_cycles: WaitCycles,
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct KeyInput {
+    pub a: bool,
+    pub b: bool,
+    pub select: bool,
+    pub start: bool,
+    pub right: bool,
+    pub left: bool,
+    pub up: bool,
+    pub down: bool,
+    pub r: bool,
+    pub l: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -454,7 +467,7 @@ impl Bus {
         ctx.gamepak_mut().read(addr & 0x01FFFFFE)
     }
 
-    pub fn write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8, first: bool) {
+    pub fn write8(&mut self, ctx: &mut impl Context, addr: u32, data: u8, _first: bool) {
         // trace!("Write8: 0x{addr:08X} = 0x{data:02X}");
 
         match addr >> 24 {
@@ -570,7 +583,7 @@ impl Bus {
         }
     }
 
-    pub fn write32(&mut self, ctx: &mut impl Context, addr: u32, data: u32, first: bool) {
+    pub fn write32(&mut self, ctx: &mut impl Context, addr: u32, data: u32, _first: bool) {
         // trace!("Write32: 0x{addr:08X} = 0x{data:08X}");
 
         match addr >> 24 {

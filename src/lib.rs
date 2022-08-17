@@ -6,7 +6,6 @@ mod context;
 mod cpu;
 mod dma;
 mod gamepak;
-mod interface;
 mod interrupt;
 mod ioreg_info;
 mod lcd;
@@ -17,23 +16,102 @@ mod timer;
 mod util;
 
 use context::Context;
-
-use interface::AudioBuf;
-pub use interface::{FrameBuf, KeyInput};
 pub use rom::Rom;
+
+use meru_interface::{
+    AudioBuffer, ConfigUi, CoreInfo, EmulatorCore, FrameBuffer, InputData, KeyConfig, Ui,
+};
+use serde::{Deserialize, Serialize};
+use std::{fs, path::PathBuf};
 
 pub struct Agb {
     ctx: Context,
 }
 
-impl Agb {
-    pub fn new(bios: Vec<u8>, rom: Rom, backup: Option<Vec<u8>>) -> Self {
-        let mut ctx = Context::new(bios, rom, backup);
-        ctx.cpu.set_pc(&mut ctx.inner, 0);
-        Agb { ctx }
+const CORE_INFO: CoreInfo = CoreInfo {
+    system_name: "Game Boy Advance (TGBA)",
+    abbrev: "gba",
+    file_extensions: &["gba"],
+};
+
+fn default_key_config() -> KeyConfig {
+    use meru_interface::key_assign::*;
+
+    #[rustfmt::skip]
+    let keys = vec![
+        ("up", any!(keycode!(Up), pad_button!(0, DPadUp))),
+        ("down", any!(keycode!(Down), pad_button!(0, DPadDown))),
+        ("left", any!(keycode!(Left), pad_button!(0, DPadLeft))),
+        ("right", any!(keycode!(Right), pad_button!(0, DPadRight))),
+        ("a", any!(keycode!(X), pad_button!(0, South))),
+        ("b", any!(keycode!(Z), pad_button!(0, West))),
+        ("l", any!(keycode!(A), pad_button!(0, LeftTrigger))),
+        ("r", any!(keycode!(S), pad_button!(0, RightTrigger))),
+        ("start", any!(keycode!(Return), pad_button!(0, Start))),
+        ("select", any!(keycode!(RShift), pad_button!(0, Select))),
+    ];
+
+    KeyConfig {
+        controllers: vec![keys.into_iter().map(|(k, v)| (k.to_string(), v)).collect()],
+    }
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct Config {
+    bios: Option<PathBuf>,
+}
+
+impl ConfigUi for Config {
+    fn ui(&mut self, ui: &mut impl Ui) {
+        ui.file("BIOS:", &mut self.bios, &[("BIOS file", &["*"])]);
+        if self.bios.is_none() {
+            ui.label("BIOS must be specified");
+        }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("BIOS must be specified")]
+    BiosNotSpecified,
+    #[error("{0}")]
+    RomError(#[from] rom::RomError),
+    #[error("deserialize failed: {0}")]
+    DeserializeFailed(#[from] bincode::Error),
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl EmulatorCore for Agb {
+    type Config = Config;
+    type Error = Error;
+
+    fn core_info() -> &'static CoreInfo {
+        &CORE_INFO
     }
 
-    pub fn info(&self) -> Vec<(String, String)> {
+    fn try_from_file(
+        data: &[u8],
+        backup: Option<&[u8]>,
+        config: &Self::Config,
+    ) -> Result<Self, Self::Error>
+    where
+        Self: Sized,
+    {
+        let bios = config
+            .bios
+            .as_ref()
+            .ok_or_else(|| Error::BiosNotSpecified)?;
+        let bios = fs::read(bios)?;
+
+        let rom = Rom::from_bytes(data)?;
+
+        let mut ctx = Context::new(bios, rom, backup.map(|r| r.to_vec()));
+        ctx.cpu.set_pc(&mut ctx.inner, 0);
+        Ok(Agb { ctx })
+    }
+
+    fn game_info(&self) -> Vec<(String, String)> {
         use context::GamePak;
         let rom = self.ctx.gamepak().rom();
 
@@ -65,22 +143,17 @@ impl Agb {
         ]
     }
 
-    pub fn reset(&mut self) {
-        use context::{Bus, GamePak};
+    fn set_config(&mut self, _config: &Self::Config) {}
 
-        let bios = self.ctx.bus().bios.clone();
-        let rom = self.ctx.gamepak().rom().clone();
-        let backup = self.ctx.backup().data();
-
-        self.ctx = Context::new(bios, rom, backup);
-    }
-
-    pub fn exec_frame(&mut self, render_graphics: bool) {
+    fn exec_frame(&mut self, render_graphics: bool) {
         use context::{Bus, Lcd, Sound};
 
-        self.ctx.sound_mut().clear_buf();
         self.ctx.lcd_mut().set_render_graphics(render_graphics);
-        self.ctx.sound_mut().clear_buf();
+        self.ctx
+            .lcd_mut()
+            .frame_buffer_mut()
+            .resize(consts::SCREEN_WIDTH as _, consts::SCREEN_HEIGHT as _);
+        self.ctx.sound_mut().clear_buffer();
 
         let start_frame = self.ctx.lcd().frame();
         while start_frame == self.ctx.lcd().frame() {
@@ -93,54 +166,73 @@ impl Agb {
         }
     }
 
-    pub fn ctx(&self) -> &Context {
-        &self.ctx
+    fn reset(&mut self) {
+        use context::{Bus, GamePak};
+
+        let bios = self.ctx.bus().bios.clone();
+        let rom = self.ctx.gamepak().rom().clone();
+        let backup = self.ctx.backup().data();
+
+        self.ctx = Context::new(bios, rom, backup);
     }
 
-    pub fn ctx_mut(&mut self) -> &mut Context {
-        &mut self.ctx
-    }
-
-    pub fn frame_buf(&self) -> &FrameBuf {
+    fn frame_buffer(&self) -> &FrameBuffer {
         use context::Lcd;
-        self.ctx.lcd().frame_buf()
+        self.ctx.lcd().frame_buffer()
     }
 
-    pub fn audio_buf(&self) -> &AudioBuf {
+    fn audio_buffer(&self) -> &AudioBuffer {
         use context::Sound;
-        self.ctx.sound().audio_buf()
+        self.ctx.sound().audio_buffer()
     }
 
-    pub fn set_key_input(&mut self, key_input: &KeyInput) {
+    fn default_key_config() -> KeyConfig {
+        default_key_config()
+    }
+
+    fn set_input(&mut self, input: &InputData) {
+        let mut agb_input = bus::KeyInput::default();
+
+        for (key, value) in &input.controllers[0] {
+            match key.as_str() {
+                "a" => agb_input.a = *value,
+                "b" => agb_input.b = *value,
+                "start" => agb_input.start = *value,
+                "select" => agb_input.select = *value,
+                "l" => agb_input.l = *value,
+                "r" => agb_input.r = *value,
+                "up" => agb_input.up = *value,
+                "down" => agb_input.down = *value,
+                "left" => agb_input.left = *value,
+                "right" => agb_input.right = *value,
+                _ => unreachable!(),
+            }
+        }
+
         use context::Bus;
-        self.ctx.set_key_input(key_input);
+        self.ctx.set_key_input(&agb_input);
     }
 
-    pub fn backup(&self) -> Option<Vec<u8>> {
+    fn backup(&self) -> Option<Vec<u8>> {
         use context::GamePak;
         self.ctx.gamepak().backup().data()
     }
 
-    pub fn save_state(&self) -> Vec<u8> {
+    fn save_state(&self) -> Vec<u8> {
         bincode::serialize(&self.ctx).unwrap()
     }
 
-    pub fn load_state(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        use context::{Bus, GamePak, Lcd};
-        use std::mem::swap;
+    fn load_state(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        use context::{Bus, GamePak};
 
         let mut ctx: Context = bincode::deserialize(data)?;
 
         // Restore unsaved components
-        swap(
+        std::mem::swap(
             self.ctx.gamepak_mut().rom_mut(),
             ctx.gamepak_mut().rom_mut(),
         );
-        swap(&mut self.ctx.bus_mut().bios, &mut ctx.bus_mut().bios);
-        swap(
-            &mut self.ctx.lcd_mut().frame_buf,
-            &mut ctx.lcd_mut().frame_buf,
-        );
+        std::mem::swap(&mut self.ctx.bus_mut().bios, &mut ctx.bus_mut().bios);
 
         self.ctx = ctx;
         Ok(())

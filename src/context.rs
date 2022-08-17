@@ -1,4 +1,4 @@
-use crate::{backup, bus, cpu, gamepak, interrupt, lcd, rom, sound, KeyInput};
+use crate::{backup, bus, cpu, gamepak, interrupt, lcd, rom, sound};
 use ambassador::{delegatable_trait, Delegate};
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,7 @@ pub trait Bus {
     fn bus_tick(&mut self);
     fn dma_tick(&mut self) -> bool;
 
-    fn set_key_input(&mut self, key_input: &KeyInput);
+    fn set_key_input(&mut self, key_input: &bus::KeyInput);
 }
 
 #[delegatable_trait]
@@ -165,7 +165,7 @@ impl Bus for Inner {
         self.bus.dma_tick(&mut self.inner)
     }
 
-    fn set_key_input(&mut self, key_input: &KeyInput) {
+    fn set_key_input(&mut self, key_input: &bus::KeyInput) {
         self.bus.set_key_input(&mut self.inner, key_input);
     }
 }

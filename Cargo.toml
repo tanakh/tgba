@@ -1,6 +1,6 @@
 [package]
 name = "tgba"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Hideyuki Tanaka <tanaka.hideyuki@gmail.com>"]
 license = "MIT"
@@ -12,10 +12,11 @@ categories = ["emulators"]
 keywords = ["emulators"]
 
 [dependencies]
-ambassador = "0.3.1"
-anyhow = "1.0.57"
+meru-interface = { git = "https://github.com/tanakh/meru/", version = "0.2.0" }
+ambassador = "0.3.2"
 bincode = "1.3.3"
-bitvec = "1.0.0"
+bitvec = "1.0.1"
 log = "0.4.17"
 serde = { version = "1.0", features = ["derive"] }
-serde_bytes = "0.11.6"
+serde_bytes = "0.11.7"
+thiserror = "1.0.32"

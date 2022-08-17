@@ -1,4 +1,3 @@
-use anyhow::{bail, Result};
 use log::error;
 
 use crate::backup::Backup;
@@ -14,17 +13,23 @@ pub struct Rom {
     pub rom_version: u8,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum RomError {
+    #[error("Invalid magic number: 0x{0:02X}, expected: 0x96")]
+    InvalidMagic(u8),
+}
+
 impl Rom {
-    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, RomError> {
         let header = &data[0xA0..0xC0];
 
         let title = header[..0xC].to_vec();
-        let game_code = header[0xC..0x10].try_into()?;
-        let maker_code = header[0x10..0x12].try_into()?;
+        let game_code = header[0xC..0x10].try_into().unwrap();
+        let maker_code = header[0x10..0x12].try_into().unwrap();
 
         let magic = header[0x12];
         if magic != 0x96 {
-            bail!("Invalid magic number: 0x{magic:02X}, expected: 0x96");
+            Err(RomError::InvalidMagic(magic))?
         }
 
         let main_unit_code = header[0x13];

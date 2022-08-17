@@ -70,13 +70,13 @@ impl Backup {
         }
     }
 
-    pub fn eeprom_size(&self) -> Option<Option<EepromSize>> {
-        if let Backup::Eeprom(eeprom) = self {
-            Some(eeprom.size())
-        } else {
-            None
-        }
-    }
+    // pub fn eeprom_size(&self) -> Option<Option<EepromSize>> {
+    //     if let Backup::Eeprom(eeprom) = self {
+    //         Some(eeprom.size())
+    //     } else {
+    //         None
+    //     }
+    // }
 
     pub fn set_eeprom_size(&mut self, size: EepromSize) {
         if let Backup::Eeprom(eeprom) = self {

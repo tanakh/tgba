@@ -2,6 +2,7 @@ use std::cmp::min;
 
 use bitvec::prelude::*;
 use log::{info, trace};
+use meru_interface::{FrameBuffer, Pixel};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -9,7 +10,6 @@ use crate::{
         CLOCK_PER_DOT, DOTS_PER_LINE, HBLANK_POS, LINES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH,
     },
     context::{Interrupt, Timing},
-    interface::{FrameBuf, Pixel},
     interrupt::InterruptKind,
     util::{pack, read16, trait_alias},
 };
@@ -63,12 +63,12 @@ pub struct Lcd {
     render_graphics: bool,
 
     #[serde(skip)]
-    line_buf: LineBuf,
+    line_buffer: LineBuffer,
     #[serde(skip)]
-    pub frame_buf: FrameBuf,
+    frame_buffer: FrameBuffer,
 }
 
-struct LineBuf {
+struct LineBuffer {
     bg: [Vec<u16>; 4],
     obj: Vec<u16>,
     obj_attr: Vec<ObjAttr>,
@@ -116,7 +116,7 @@ impl SurfaceAttr {
     }
 }
 
-impl Default for LineBuf {
+impl Default for LineBuffer {
     fn default() -> Self {
         Self {
             bg: <[Vec<u16>; 4]>::default().map(|_| vec![0x8000; SCREEN_WIDTH as _]),
@@ -130,7 +130,7 @@ impl Default for LineBuf {
     }
 }
 
-impl LineBuf {
+impl LineBuffer {
     fn clear(&mut self) {
         self.obj_attr.fill(ObjAttr::default());
         self.obj.fill(0x8000);
@@ -235,7 +235,7 @@ impl Lcd {
             vram: vec![0; 96 * 1024],
             oam: vec![0; 1024],
             palette: vec![0; 1024],
-            frame_buf: FrameBuf::new(SCREEN_WIDTH, SCREEN_HEIGHT),
+            frame_buffer: FrameBuffer::default(),
             ..Default::default()
         }
     }
@@ -256,8 +256,12 @@ impl Lcd {
         self.render_graphics = render_graphics;
     }
 
-    pub fn frame_buf(&self) -> &FrameBuf {
-        &self.frame_buf
+    pub fn frame_buffer(&self) -> &FrameBuffer {
+        &self.frame_buffer
+    }
+
+    pub fn frame_buffer_mut(&mut self) -> &mut FrameBuffer {
+        &mut self.frame_buffer
     }
 
     pub fn tick(&mut self, ctx: &mut impl Context) {
@@ -642,13 +646,13 @@ impl Lcd {
         }
 
         if self.force_blank {
-            for x in 0..SCREEN_WIDTH {
-                *self.frame_buf.pixel_mut(x, self.y) = Pixel::new(255, 255, 255);
+            for x in 0..SCREEN_WIDTH as usize {
+                *self.frame_buffer.pixel_mut(x, self.y as _) = Pixel::new(255, 255, 255);
             }
             return;
         }
 
-        self.line_buf.clear();
+        self.line_buffer.clear();
 
         trace!("Render line: y = {}, mode = {}", self.y, self.bg_mode);
 
@@ -702,9 +706,9 @@ impl Lcd {
 
         self.color_special_effect();
 
-        for x in 0..SCREEN_WIDTH {
-            *self.frame_buf.pixel_mut(x, self.y) =
-                Pixel::from_u16(self.line_buf.finished[x as usize]);
+        for x in 0..SCREEN_WIDTH as usize {
+            *self.frame_buffer.pixel_mut(x, self.y as _) =
+                u16_to_pixel(self.line_buffer.finished[x as usize]);
         }
     }
 
@@ -774,7 +778,7 @@ impl Lcd {
                 let tmp = self.vram[char_addr + oy * 4 + ox / 2];
                 let col = (tmp >> ((ox & 1) * 4)) & 0xF;
                 if col != 0 {
-                    self.line_buf.bg[i][x as usize] = self.bg_palette16(palette as _, col as _);
+                    self.line_buffer.bg[i][x as usize] = self.bg_palette16(palette as _, col as _);
                 }
             } else {
                 // 256 x 1 color mode
@@ -786,7 +790,7 @@ impl Lcd {
 
                 let col = self.vram[char_addr + oy * 8 + ox];
                 if col != 0 {
-                    self.line_buf.bg[i][x as usize] = self.bg_palette256(col as _);
+                    self.line_buffer.bg[i][x as usize] = self.bg_palette256(col as _);
                 }
             };
         }
@@ -821,7 +825,7 @@ impl Lcd {
                 let col_num = self.vram[char_base_addr + char * 64 + oy * 8 + ox];
 
                 if col_num != 0 {
-                    self.line_buf.bg[i][x as usize] = self.bg_palette256(col_num as _);
+                    self.line_buffer.bg[i][x as usize] = self.bg_palette256(col_num as _);
                 }
             }
         }
@@ -840,7 +844,7 @@ impl Lcd {
             if let Some((rx, ry)) = self.calc_refpoint_for_x(i, 240, 160, false, x, cx, cy) {
                 let addr = (ry * 240 + rx) as usize * 2;
                 let col = read16(&self.vram, addr);
-                self.line_buf.bg[i][x as usize] = col & 0x7FFF;
+                self.line_buffer.bg[i][x as usize] = col & 0x7FFF;
             }
         }
     }
@@ -859,7 +863,7 @@ impl Lcd {
             if let Some((rx, ry)) = self.calc_refpoint_for_x(i, 240, 160, false, x, cx, cy) {
                 let col_num = self.vram[(base_addr + (ry * 240 + rx)) as usize];
                 if col_num != 0 {
-                    self.line_buf.bg[i][x as usize] = self.bg_palette256(col_num as _);
+                    self.line_buffer.bg[i][x as usize] = self.bg_palette256(col_num as _);
                 }
             }
         }
@@ -879,7 +883,7 @@ impl Lcd {
             if let Some((rx, ry)) = self.calc_refpoint_for_x(i, 160, 128, false, x, cx, cy) {
                 let addr = (base_addr + (ry * 160 + rx) * 2) as usize;
                 let col = read16(&self.vram, addr);
-                self.line_buf.bg[i][x as usize] = col & 0x7FFF;
+                self.line_buffer.bg[i][x as usize] = col & 0x7FFF;
             }
         }
     }
@@ -1226,26 +1230,26 @@ impl Lcd {
         match mode {
             // normal
             0 => {
-                if self.line_buf.obj[x] & 0x8000 != 0
-                    || priority < self.line_buf.obj_attr[x].priority()
+                if self.line_buffer.obj[x] & 0x8000 != 0
+                    || priority < self.line_buffer.obj_attr[x].priority()
                 {
-                    self.line_buf.obj[x] = col;
-                    self.line_buf.obj_attr[x].set_priority(priority);
-                    self.line_buf.obj_attr[x].set_semi_transparent(false);
+                    self.line_buffer.obj[x] = col;
+                    self.line_buffer.obj_attr[x].set_priority(priority);
+                    self.line_buffer.obj_attr[x].set_semi_transparent(false);
                 }
             }
             // semi-trans
             1 => {
-                if self.line_buf.obj[x] & 0x8000 != 0
-                    || priority < self.line_buf.obj_attr[x].priority()
+                if self.line_buffer.obj[x] & 0x8000 != 0
+                    || priority < self.line_buffer.obj_attr[x].priority()
                 {
-                    self.line_buf.obj[x] = col;
-                    self.line_buf.obj_attr[x].set_priority(priority);
-                    self.line_buf.obj_attr[x].set_semi_transparent(true);
+                    self.line_buffer.obj[x] = col;
+                    self.line_buffer.obj_attr[x].set_priority(priority);
+                    self.line_buffer.obj_attr[x].set_semi_transparent(true);
                 }
             }
             // obj-window
-            2 => self.line_buf.obj_attr[x].set_window(true),
+            2 => self.line_buffer.obj_attr[x].set_window(true),
             _ => unreachable!(),
         }
     }
@@ -1305,7 +1309,7 @@ impl Lcd {
                 &self.winin[0]
             } else if in_win1 {
                 &self.winin[1]
-            } else if self.display_obj_window && self.line_buf.obj_attr[x as usize].window() {
+            } else if self.display_obj_window && self.line_buffer.obj_attr[x as usize].window() {
                 &self.objwin
             } else if winout_enable {
                 &self.winout
@@ -1325,18 +1329,18 @@ impl Lcd {
             self.put_surface_pixel(x, backdrop, SurfaceAttr::new(4, 5, effect));
 
             if self.display_obj && win_ctrl.display_obj {
-                let col = self.line_buf.obj[x];
+                let col = self.line_buffer.obj[x];
                 if col & 0x8000 == 0 {
                     let effect = if !win_ctrl.color_special_effect {
                         0
                     } else {
-                        let obj_trans = self.line_buf.obj_attr[x].semi_transparent();
+                        let obj_trans = self.line_buffer.obj_attr[x].semi_transparent();
                         global_effect | if obj_trans { 4 } else { 0 }
                     };
                     self.put_surface_pixel(
                         x,
                         col,
-                        SurfaceAttr::new(self.line_buf.obj_attr[x].priority(), 4, effect),
+                        SurfaceAttr::new(self.line_buffer.obj_attr[x].priority(), 4, effect),
                     );
                 }
             }
@@ -1346,7 +1350,7 @@ impl Lcd {
                     continue;
                 }
 
-                let col = self.line_buf.bg[i][x];
+                let col = self.line_buffer.bg[i][x];
                 if col & 0x8000 == 0 {
                     self.put_surface_pixel(
                         x,
@@ -1359,15 +1363,15 @@ impl Lcd {
     }
 
     fn put_surface_pixel(&mut self, x: usize, col: u16, attr: SurfaceAttr) {
-        if self.line_buf.surface_attr[0][x].priority() > attr.priority() {
-            self.line_buf.surface[1][x] = self.line_buf.surface[0][x];
-            self.line_buf.surface_attr[1][x] = self.line_buf.surface_attr[0][x].clone();
+        if self.line_buffer.surface_attr[0][x].priority() > attr.priority() {
+            self.line_buffer.surface[1][x] = self.line_buffer.surface[0][x];
+            self.line_buffer.surface_attr[1][x] = self.line_buffer.surface_attr[0][x].clone();
 
-            self.line_buf.surface[0][x] = col;
-            self.line_buf.surface_attr[0][x] = attr;
-        } else if self.line_buf.surface_attr[1][x].priority() > attr.priority() {
-            self.line_buf.surface[1][x] = col;
-            self.line_buf.surface_attr[1][x] = attr
+            self.line_buffer.surface[0][x] = col;
+            self.line_buffer.surface_attr[0][x] = attr;
+        } else if self.line_buffer.surface_attr[1][x].priority() > attr.priority() {
+            self.line_buffer.surface[1][x] = col;
+            self.line_buffer.surface_attr[1][x] = attr
         }
     }
 
@@ -1383,10 +1387,10 @@ impl Lcd {
         for x in 0..SCREEN_WIDTH {
             let x = x as usize;
 
-            let c0 = self.line_buf.surface[0][x];
-            let c1 = self.line_buf.surface[1][x];
-            let a0 = &self.line_buf.surface_attr[0][x];
-            let a1 = &self.line_buf.surface_attr[1][x];
+            let c0 = self.line_buffer.surface[0][x];
+            let c1 = self.line_buffer.surface[1][x];
+            let a0 = &self.line_buffer.surface_attr[0][x];
+            let a1 = &self.line_buffer.surface_attr[1][x];
 
             let eff = a0.effect();
 
@@ -1400,7 +1404,7 @@ impl Lcd {
                 _ => c0,
             };
 
-            self.line_buf.finished[x] = col;
+            self.line_buffer.finished[x] = col;
         }
     }
 
@@ -1473,4 +1477,16 @@ fn num_of_render_cycle(width: u32, rot: bool) -> u32 {
 fn sign_extend(x: u32, sign: u32) -> i32 {
     let shift = 31 - sign;
     (x << shift) as i32 >> shift
+}
+
+fn u16_to_pixel(p: u16) -> Pixel {
+    Pixel::new(
+        extend_color(p & 0x1F),
+        extend_color((p >> 5) & 0x1F),
+        extend_color((p >> 10) & 0x1F),
+    )
+}
+
+fn extend_color(col5: u16) -> u8 {
+    ((col5 << 3) | (col5 >> 2)) as u8
 }

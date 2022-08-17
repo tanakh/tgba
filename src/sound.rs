@@ -2,12 +2,12 @@ use std::{cmp::min, collections::VecDeque};
 
 use bitvec::prelude::*;
 use log::warn;
+use meru_interface::{AudioBuffer, AudioSample};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     consts::AUDIO_SAMPLES_PER_SECOND,
     context::{Interrupt, SoundDma, Timing},
-    interface::{AudioBuf, AudioSample},
     util::{pack, trait_alias},
 };
 
@@ -35,7 +35,7 @@ pub struct Sound {
     sampling_counter: u32,
 
     #[serde(skip)]
-    audio_buffer: AudioBuf,
+    audio_buffer: AudioBuffer,
 }
 
 impl Sound {
@@ -63,12 +63,13 @@ impl Sound {
         }
     }
 
-    pub fn audio_buf(&self) -> &AudioBuf {
+    pub fn audio_buffer(&self) -> &AudioBuffer {
         &self.audio_buffer
     }
 
-    pub fn clear_buf(&mut self) {
-        self.audio_buffer.buf.clear();
+    pub fn clear_buffer(&mut self) {
+        self.audio_buffer.samples.clear();
+        self.audio_buffer.sample_rate = AUDIO_SAMPLES_PER_SECOND;
     }
 
     fn set_power(&mut self, on: bool) {
@@ -162,7 +163,7 @@ impl Sound {
         if self.sampling_counter >= TICKS_PER_SECOND {
             self.sampling_counter -= TICKS_PER_SECOND;
             let sample = self.mix_output();
-            self.audio_buffer.buf.push(sample);
+            self.audio_buffer.samples.push(sample);
         }
     }
 
