@@ -39,16 +39,16 @@ fn default_key_config() -> KeyConfig {
 
     #[rustfmt::skip]
     let keys = vec![
-        ("up", any!(keycode!(Up), pad_button!(0, DPadUp))),
-        ("down", any!(keycode!(Down), pad_button!(0, DPadDown))),
-        ("left", any!(keycode!(Left), pad_button!(0, DPadLeft))),
-        ("right", any!(keycode!(Right), pad_button!(0, DPadRight))),
-        ("a", any!(keycode!(X), pad_button!(0, South))),
-        ("b", any!(keycode!(Z), pad_button!(0, West))),
-        ("l", any!(keycode!(A), pad_button!(0, LeftTrigger))),
-        ("r", any!(keycode!(S), pad_button!(0, RightTrigger))),
-        ("start", any!(keycode!(Return), pad_button!(0, Start))),
-        ("select", any!(keycode!(RShift), pad_button!(0, Select))),
+        ("Up", any!(keycode!(Up), pad_button!(0, DPadUp))),
+        ("Down", any!(keycode!(Down), pad_button!(0, DPadDown))),
+        ("Left", any!(keycode!(Left), pad_button!(0, DPadLeft))),
+        ("Right", any!(keycode!(Right), pad_button!(0, DPadRight))),
+        ("A", any!(keycode!(X), pad_button!(0, East))),
+        ("B", any!(keycode!(Z), pad_button!(0, South))),
+        ("L", any!(keycode!(A), pad_button!(0, LeftTrigger))),
+        ("R", any!(keycode!(S), pad_button!(0, RightTrigger))),
+        ("Start", any!(keycode!(Return), pad_button!(0, Start))),
+        ("Select", any!(keycode!(RShift), pad_button!(0, Select))),
     ];
 
     KeyConfig {
@@ -195,16 +195,16 @@ impl EmulatorCore for Agb {
 
         for (key, value) in &input.controllers[0] {
             match key.as_str() {
-                "a" => agb_input.a = *value,
-                "b" => agb_input.b = *value,
-                "start" => agb_input.start = *value,
-                "select" => agb_input.select = *value,
-                "l" => agb_input.l = *value,
-                "r" => agb_input.r = *value,
-                "up" => agb_input.up = *value,
-                "down" => agb_input.down = *value,
-                "left" => agb_input.left = *value,
-                "right" => agb_input.right = *value,
+                "A" => agb_input.a = *value,
+                "B" => agb_input.b = *value,
+                "Start" => agb_input.start = *value,
+                "Select" => agb_input.select = *value,
+                "L" => agb_input.l = *value,
+                "R" => agb_input.r = *value,
+                "Up" => agb_input.up = *value,
+                "Down" => agb_input.down = *value,
+                "Left" => agb_input.left = *value,
+                "Right" => agb_input.right = *value,
                 _ => unreachable!(),
             }
         }
