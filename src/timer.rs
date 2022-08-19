@@ -16,12 +16,13 @@ pub struct Timers {
 }
 
 impl Timers {
-    pub fn read16(&self, addr: u32) -> u16 {
+    pub fn read(&self, addr: u32) -> u8 {
         match addr {
             // TMxCNT_L
-            0x100 | 0x104 | 0x108 | 0x10C => {
+            0x100 | 0x101 | 0x104 | 0x105 | 0x108 | 0x109 | 0x10C | 0x10D => {
                 let i = ((addr - 0x100) / 4) as usize;
-                self.timer[i].counter
+                let ofs = addr & 1;
+                (self.timer[i].counter >> (ofs * 8)) as u8
             }
             // TMxCNT_H
             0x102 | 0x106 | 0x10A | 0x10E => {
@@ -34,16 +35,21 @@ impl Timers {
                     7     => timer.enable,
                 }
             }
+            0x103 | 0x107 | 0x10B | 0x10F => 0,
             _ => unreachable!(),
         }
     }
 
-    pub fn write16(&mut self, addr: u32, data: u16) {
+    pub fn write(&mut self, addr: u32, data: u8) {
         match addr {
             // TMxCNT_L
-            0x100 | 0x104 | 0x108 | 0x10C => {
+            0x100 | 0x101 | 0x104 | 0x105 | 0x108 | 0x109 | 0x10C | 0x10D => {
                 let i = ((addr - 0x100) / 4) as usize;
-                self.timer[i].reload = data;
+                if addr & 1 == 0 {
+                    self.timer[i].reload = self.timer[i].reload & 0xFF00 | data as u16;
+                } else {
+                    self.timer[i].reload = (data as u16) << 8 | self.timer[i].reload & 0xFF;
+                }
             }
             // TMxCNT_H
             0x102 | 0x106 | 0x10A | 0x10E => {
@@ -59,6 +65,7 @@ impl Timers {
                 }
                 timer.enable = data[7];
             }
+            0x103 | 0x107 | 0x10B | 0x10F => {}
             _ => unreachable!(),
         }
     }
