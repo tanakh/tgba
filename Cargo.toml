@@ -12,7 +12,8 @@ categories = ["emulators"]
 keywords = ["emulators"]
 
 [dependencies]
-meru-interface = { git = "https://github.com/tanakh/meru/", version = "0.2.0" }
+meru-interface = "0.2.0"
+
 ambassador = "0.3.2"
 bincode = "1.3.3"
 bitvec = "1.0.1"
