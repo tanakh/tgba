@@ -672,19 +672,23 @@ impl Bus {
                 let hi = ctx.sound_read(addr + 1);
                 return lo.map(|lo| (hi.unwrap_or(lo) as u16) << 8 | lo as u16);
             }
-            0x120..=0x12E | 0x134..=0x15E => {
-                let lo = self.sio.read(addr);
-                let hi = self.sio.read(addr + 1);
-                return lo.map(|lo| (hi.unwrap_or(lo) as u16) << 8 | lo as u16);
-            }
-
             0x0B0..=0x0DE => {
                 let ch = (addr - 0xB0) / 0xC;
                 self.dma(ch as usize).read16(addr - 0xB0 - ch * 0xC)
             }
 
             0x0E0..=0x0FE => return None,
-            0x100..=0x10E => self.timers.read16(addr),
+            0x100..=0x10E => {
+                let lo = self.timers.read(addr);
+                let hi = self.timers.read(addr + 1);
+                (hi as u16) << 8 | lo as u16
+            }
+
+            0x120..=0x12E | 0x134..=0x15E => {
+                let lo = self.sio.read(addr);
+                let hi = self.sio.read(addr + 1);
+                return lo.map(|lo| (hi.unwrap_or(lo) as u16) << 8 | lo as u16);
+            }
 
             // KEYINPUT
             0x130 => self.key_input,
@@ -736,7 +740,7 @@ impl Bus {
         match addr {
             0x000..=0x05F => ctx.lcd_write(addr, data),
             0x060..=0x0AF => ctx.sound_write(addr, data),
-            0x100..=0x10E => self.timers.write16(addr, data as u16),
+            0x100..=0x10E => self.timers.write(addr, data),
             0x120..=0x12E | 0x134..=0x15F => self.sio.write(addr, data),
 
             // IF
@@ -790,7 +794,6 @@ impl Bus {
                     .write16(ctx, addr - 0xB0 - ch * 0xC, data);
             }
             0x0E0..=0x0FE => {}
-            0x100..=0x10E => self.timers.write16(addr, data),
             0x110..=0x11E => {}
 
             // KEYINPUT
