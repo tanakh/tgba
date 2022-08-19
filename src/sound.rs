@@ -1,7 +1,7 @@
 use std::{cmp::min, collections::VecDeque};
 
 use bitvec::prelude::*;
-use log::warn;
+use log::{info, warn};
 use meru_interface::{AudioBuffer, AudioSample};
 use serde::{Deserialize, Serialize};
 
@@ -183,11 +183,10 @@ impl Sound {
 
         let mut cgb_output = [0, 0];
 
-        for ch in 0..4 {
-            let output = ch_output[ch] as i32;
-            for lr in 0..2 {
+        for (ch, output) in ch_output.iter().enumerate() {
+            for (lr, cgb_output) in cgb_output.iter_mut().enumerate() {
                 if self.channel_ctrl[lr].output_ch[ch] {
-                    cgb_output[lr] += output * self.channel_ctrl[lr].volume as i32 / 8;
+                    *cgb_output += *output as i32 * self.channel_ctrl[lr].volume as i32 / 8;
                 }
             }
         }
@@ -198,9 +197,11 @@ impl Sound {
             if let Some(output) = self.direct_sound[ch].current_output {
                 // agb channel outputs' range is -128..127
                 let output = output as i8 as i32 * 32;
-                for lr in 0..2 {
-                    if self.direct_sound[ch].output[lr] {
-                        agb_output[lr] += output;
+                for (agb_output, output_enable) in
+                    agb_output.iter_mut().zip(self.direct_sound[ch].output)
+                {
+                    if output_enable {
+                        *agb_output += output;
                     }
                 }
             }
@@ -923,7 +924,7 @@ impl DirectSound {
         self.current_output = self.fifo.pop_front();
 
         if self.current_output.is_none() && (self.output[0] || self.output[1]) {
-            warn!("Direct sound {}: FIFO empty", self.ch,);
+            info!("Direct sound {}: FIFO empty", self.ch,);
         }
 
         if self.fifo.len() <= 16 {

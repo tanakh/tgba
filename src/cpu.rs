@@ -1,7 +1,9 @@
+#![allow(clippy::unusual_byte_groupings)]
+
 use bitvec::prelude::*;
 use log::{debug, trace, warn};
 use serde::{Deserialize, Serialize};
-use std::mem::size_of;
+use std::{cmp::Ordering, mem::size_of};
 
 use crate::{
     bios::trace_swi,
@@ -61,8 +63,8 @@ enum Exception {
     PrefetchAbort,
     DataAbort,
     // Reserved,
-    IRQ,
-    FIQ,
+    Irq,
+    Fiq,
 }
 
 impl Exception {
@@ -74,8 +76,8 @@ impl Exception {
             Exception::PrefetchAbort => 0x0000000C,
             Exception::DataAbort => 0x00000010,
             // Exception::Reserved => 0x00000014,
-            Exception::IRQ => 0x00000018,
-            Exception::FIQ => 0x0000001C,
+            Exception::Irq => 0x00000018,
+            Exception::Fiq => 0x0000001C,
         }
     }
 
@@ -86,8 +88,8 @@ impl Exception {
             Exception::SoftwareInterrupt => MODE_SUPERVISOR,
             Exception::PrefetchAbort => MODE_ABORT,
             Exception::DataAbort => MODE_ABORT,
-            Exception::IRQ => MODE_IRQ,
-            Exception::FIQ => MODE_FIQ,
+            Exception::Irq => MODE_IRQ,
+            Exception::Fiq => MODE_FIQ,
         }
     }
 }
@@ -209,6 +211,7 @@ impl Registers {
     fn save_regs(&mut self) {
         let (gprs, spsr) = reg_bank(self.mode);
 
+        #[allow(clippy::needless_range_loop)]
         for i in 0..16 {
             self.gprs[gprs[i]] = self.r[i];
         }
@@ -220,6 +223,7 @@ impl Registers {
     fn restore_regs(&mut self) {
         let (gprs, spsr) = reg_bank(self.mode);
 
+        #[allow(clippy::needless_range_loop)]
         for i in 0..16 {
             self.r[i] = self.gprs[gprs[i]];
         }
@@ -315,14 +319,14 @@ impl<C: Context> Cpu<C> {
         }
 
         if !self.regs.fiq_disable && ctx.interrupt().fiq() {
-            self.exception(ctx, Exception::FIQ);
+            self.exception(ctx, Exception::Fiq);
             // FIXME
             ctx.elapse(28);
             return;
         }
 
         if !self.regs.irq_disable && ctx.interrupt().irq() {
-            self.exception(ctx, Exception::IRQ);
+            self.exception(ctx, Exception::Irq);
             // FIXME: correct time
             ctx.elapse(28);
             return;
@@ -349,12 +353,10 @@ impl<C: Context> Cpu<C> {
                 // In thumb mode, PC is +4 to SWI instruction
                 self.regs.r[15].wrapping_sub(2)
             }
+        } else if matches!(e, Exception::DataAbort) {
+            self.regs.r[15].wrapping_add(if !self.regs.state { 4 } else { 6 })
         } else {
-            if matches!(e, Exception::DataAbort) {
-                self.regs.r[15].wrapping_add(if !self.regs.state { 4 } else { 6 })
-            } else {
-                self.regs.r[15].wrapping_add(if !self.regs.state { 0 } else { 2 })
-            }
+            self.regs.r[15].wrapping_add(if !self.regs.state { 0 } else { 2 })
         };
 
         self.regs.change_mode(e.mode_on_entry());
@@ -801,16 +803,12 @@ fn build_arm_table<C: Context>() -> ([ArmOp<C>; 0x1000], [ArmDisasm; 0x1000]) {
                 0b111 => {
                     if hi & 0xF0 == 0xF0 {
                         (arm_op_swi, arm_disasm_swi)
+                    } else if lo & 1 == 0 {
+                        (arm_op_cdp, arm_disasm_cdp)
+                    } else if hi & 1 == 0 {
+                        (arm_op_mrc, arm_disasm_mrc_mcr)
                     } else {
-                        if lo & 1 == 0 {
-                            (arm_op_cdp, arm_disasm_cdp)
-                        } else {
-                            if hi & 1 == 0 {
-                                (arm_op_mrc, arm_disasm_mrc_mcr)
-                            } else {
-                                (arm_op_mcr, arm_disasm_mrc_mcr)
-                            }
-                        }
+                        (arm_op_mcr, arm_disasm_mrc_mcr)
                     }
                 }
                 _ => unreachable!(),
@@ -1112,25 +1110,17 @@ fn calc_sft(shift_type: u32, a: u32, b: u8) -> (u32, bool) {
     assert_ne!(b, 0);
     match shift_type {
         // LSL
-        0 => {
-            if b < 32 {
-                (a << b, (a >> (32 - b)) & 1 != 0)
-            } else if b == 32 {
-                (0, a & 1 != 0)
-            } else {
-                (0, false)
-            }
-        }
+        0 => match b.cmp(&32) {
+            Ordering::Less => (a << b, (a >> (32 - b)) & 1 != 0),
+            Ordering::Equal => (0, a & 1 != 0),
+            Ordering::Greater => (0, false),
+        },
         // LSR
-        1 => {
-            if b < 32 {
-                (a >> b, (a >> (b - 1)) & 1 != 0)
-            } else if b == 32 {
-                (0, (a >> 31) & 1 != 0)
-            } else {
-                (0, false)
-            }
-        }
+        1 => match b.cmp(&32) {
+            Ordering::Less => (a >> b, (a >> (b - 1)) & 1 != 0),
+            Ordering::Equal => (0, (a >> 31) & 1 != 0),
+            Ordering::Greater => (0, false),
+        },
         // ASR
         2 => {
             if b < 32 {
@@ -1820,12 +1810,10 @@ fn arm_disasm_ldst(instr: u32, _pc: u32) -> String {
                 assert_eq!(w, "");
                 assert_eq!(pre, 1);
                 format!("[r{rn}]")
+            } else if pre == 1 {
+                format!("[r{rn}, #{sign}{ofs}]{w}")
             } else {
-                if pre == 1 {
-                    format!("[r{rn}, #{sign}{ofs}]{w}")
-                } else {
-                    format!("[r{rn}], #{sign}{ofs}")
-                }
+                format!("[r{rn}], #{sign}{ofs}")
             }
         } else {
             let rm = instr & 0xF;
@@ -1845,12 +1833,10 @@ fn arm_disasm_ldst(instr: u32, _pc: u32) -> String {
                 } else {
                     format!("[r{rn}], #{sign}r{rm}")
                 }
+            } else if pre == 1 {
+                format!("[r{rn}, #{sign}r{rm}, {ty} #{amo}]{w}")
             } else {
-                if pre == 1 {
-                    format!("[r{rn}, #{sign}r{rm}, {ty} #{amo}]{w}")
-                } else {
-                    format!("[r{rn}], #{sign}r{rm}, {ty} #{amo}")
-                }
+                format!("[r{rn}], #{sign}r{rm}, {ty} #{amo}")
             }
         }
     };
@@ -1964,7 +1950,7 @@ fn arm_disasm_ldsth(instr: u32, _pc: u32) -> String {
 
         if pre == 1 {
             if ofs == 0 {
-                assert!(w == "");
+                assert!(w.is_empty());
                 format!("[r{rn}]")
             } else {
                 format!("[r{rn}, {sign}#0x{ofs}]{w}")
@@ -2019,12 +2005,10 @@ fn arm_op_ldstm<
         } else {
             base
         }
+    } else if PRE {
+        end
     } else {
-        if PRE {
-            end
-        } else {
-            end.wrapping_add(4)
-        }
+        end.wrapping_add(4)
     };
 
     let cur_mode = cpu.regs.mode;
@@ -2287,7 +2271,7 @@ fn arm_disasm_ldstc(instr: u32, _pc: u32) -> String {
         format!("[r{rn}], {sign}#0x{offset:02X}")
     };
 
-    return format!("{mne}{cond}{l} p{cp_num}, c{crd}, {addr}");
+    format!("{mne}{cond}{l} p{cp_num}, c{crd}, {addr}")
 }
 
 fn arm_op_cdp<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, _instr: u32) {
@@ -2336,7 +2320,7 @@ fn arm_disasm_mrc_mcr(instr: u32, _pc: u32) -> String {
     } else {
         format!(", {cp}")
     };
-    return format!("{mne}{cond} p{cp_num}, {cp_opc}, r{rd}, c{crn}, c{crm}{expr2}");
+    format!("{mne}{cond} p{cp_num}, {cp_opc}, r{rd}, c{crn}, c{crm}{expr2}")
 }
 
 fn arm_op_undef<C: Context>(_cpu: &mut Cpu<C>, _ctx: &mut C, instr: u32) {
@@ -2387,6 +2371,7 @@ impl<C: Context> Cpu<C> {
         )
         .unwrap();
 
+        #[allow(clippy::needless_range_loop)]
         for i in 0..=14 {
             if prev_regs[i] != self.regs.r[i] {
                 write!(&mut ret, " r{i}:{:08X}", self.regs.r[i]).unwrap();

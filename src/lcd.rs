@@ -1,8 +1,11 @@
+#![allow(dead_code)]
+
 use std::cmp::min;
 
 use bitvec::prelude::*;
 use log::{info, trace};
 use meru_interface::{FrameBuffer, Pixel};
+use modular_bitfield::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -639,6 +642,80 @@ impl Lcd {
 
 const OBJ_BASE_ADDR: u32 = 0x10000;
 
+#[bitfield(bits = 48)]
+struct Obj {
+    y: u8,
+    rot: bool,
+    double: bool,
+    mode: ObjMode,
+    mosaic: bool,
+    color256: bool,
+    shape: ObjShape,
+    x: B9,
+    rot_param: B5,
+    size: B2,
+    char_name: B10,
+    priority: B2,
+    palette: B4,
+}
+
+impl Obj {
+    fn disabled(&self) -> bool {
+        !self.rot() && self.double()
+    }
+
+    fn h_flip(&self) -> bool {
+        self.rot_param() & 8 != 0
+    }
+    fn v_flip(&self) -> bool {
+        self.rot_param() & 0x10 != 0
+    }
+
+    fn raw_sizes(&self) -> Option<(u32, u32)> {
+        const OBJ_SIZE_TBL: [[(u32, u32); 4]; 3] = [
+            [(8, 8), (16, 16), (32, 32), (64, 64)],
+            [(16, 8), (32, 8), (32, 16), (64, 32)],
+            [(8, 16), (8, 32), (16, 32), (32, 64)],
+        ];
+
+        let shape = self.shape();
+
+        // prohibited
+        if matches!(shape, ObjShape::Prohibited) {
+            None?
+        }
+
+        Some(OBJ_SIZE_TBL[shape as usize][self.size() as usize])
+    }
+
+    fn sizes(&self) -> Option<(u32, u32)> {
+        let (w, h) = self.raw_sizes()?;
+        Some(if !self.double() {
+            (w, h)
+        } else {
+            (w * 2, h * 2)
+        })
+    }
+}
+
+#[derive(BitfieldSpecifier)]
+#[bits = 2]
+enum ObjMode {
+    Normal = 0,
+    SemiTransparent = 1,
+    Window = 2,
+    Prohibited = 3,
+}
+
+#[derive(BitfieldSpecifier)]
+#[bits = 2]
+enum ObjShape {
+    Square = 0,
+    Horizontal = 1,
+    Vertical = 2,
+    Prohibited = 3,
+}
+
 impl Lcd {
     fn render_line(&mut self) {
         if !self.render_graphics {
@@ -907,6 +984,7 @@ impl Lcd {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn calc_refpoint_for_x(
         &self,
         i: usize,
@@ -961,59 +1039,25 @@ impl Lcd {
         let mut avail_cycle = num_of_hdots * 4 - 6;
 
         for i in 0..128 {
-            let oam = &self.oam[i * 8..i * 8 + 6];
-            let rot = oam[1] & 1 != 0;
-            let double = oam[1] & 2 != 0;
+            let obj = Obj::from_bytes(self.oam[i * 8..i * 8 + 6].try_into().unwrap());
 
             // This case is not displayed
-            if (double, rot) == (true, false) {
+            if obj.disabled() || matches!(obj.mode(), ObjMode::Prohibited) {
                 continue;
             }
 
-            let y = oam[0] as u32;
-
-            // 00: normal
-            // 01: semi-transparent
-            // 10: obj window
-            // 11: prohibited
-            let mode = (oam[1] >> 2) & 3;
-            if mode == 3 {
+            let (w, h) = if let Some(sizes) = obj.sizes() {
+                sizes
+            } else {
                 continue;
-            }
-
-            let shape = (oam[1] >> 6) & 3;
-
-            // prohibited
-            if shape == 3 {
-                continue;
-            }
-
-            let x = oam[2] as u32 | (oam[3] as u32 & 1) << 8;
-
-            let size = (oam[3] >> 6) & 3;
-
-            const OBJ_SIZE_TBL: [[(u32, u32); 4]; 3] = [
-                [(8, 8), (16, 16), (32, 32), (64, 64)],
-                [(16, 8), (32, 8), (32, 16), (64, 32)],
-                [(8, 16), (8, 32), (16, 32), (32, 64)],
-            ];
-
-            let (ow, oh) = OBJ_SIZE_TBL[shape as usize][size as usize];
-            let w = ow * if double { 2 } else { 1 };
-            let h = oh * if double { 2 } else { 1 };
-
-            let char_name = oam[4] as u32 | (oam[5] as u32 & 3) << 8;
+            };
 
             // On BG 3-5, Obj char ram is halved, so 0-511 are disabled
-            if self.bg_mode >= 3 && char_name < 512 {
+            if self.bg_mode >= 3 && obj.char_name() < 512 {
                 continue;
             }
 
-            let priority = (oam[5] >> 2) & 3;
-
-            let color_256 = oam[1] & 0x20 != 0;
-
-            let mosaic = oam[1] & 0x10 != 0;
+            let mosaic = obj.mosaic();
 
             let scry = if mosaic {
                 let mosaic_h = self.obj_mosaic_v as u32 + 1;
@@ -1021,6 +1065,8 @@ impl Lcd {
             } else {
                 self.y
             };
+
+            let y = obj.y() as u32;
 
             let rely = if y + h > 256 {
                 if !(scry < y + h - 256 && self.y < y + h - 256) {
@@ -1036,48 +1082,14 @@ impl Lcd {
 
             let mosaic_w = if mosaic { self.obj_mosaic_h + 1 } else { 1 } as u32;
 
-            if !rot {
-                let hflip = oam[3] & 0x10 != 0;
-                let vflip = oam[3] & 0x20 != 0;
-                let palette_num = oam[5] >> 4;
-
-                self.render_normal_obj(
-                    hflip,
-                    vflip,
-                    color_256,
-                    palette_num,
-                    mode,
-                    mosaic_w,
-                    priority,
-                    char_name,
-                    w,
-                    h,
-                    x,
-                    rely,
-                );
+            if !obj.rot() {
+                self.render_normal_obj(&obj, mosaic_w, rely);
             } else {
-                let rot_param_num = (oam[3] >> 1) & 0x1F;
-                let palette_num = oam[5] >> 4;
-
-                self.render_rotate_obj(
-                    rot_param_num,
-                    color_256,
-                    palette_num,
-                    mode,
-                    mosaic_w,
-                    priority,
-                    char_name,
-                    ow,
-                    oh,
-                    w,
-                    h,
-                    x,
-                    rely,
-                );
+                self.render_rotate_obj(&obj, mosaic_w, rely);
             }
 
             // TODO: how many cycles for invisible objs?
-            avail_cycle -= min(avail_cycle, num_of_render_cycle(w, rot));
+            avail_cycle -= min(avail_cycle, num_of_render_cycle(w, obj.rot()));
 
             if avail_cycle == 0 {
                 break;
@@ -1085,23 +1097,18 @@ impl Lcd {
         }
     }
 
-    fn render_normal_obj(
-        &mut self,
-        hflip: bool,
-        vflip: bool,
-        color256: bool,
-        palette_num: u8,
-        mode: u8,
-        mosaic_w: u32,
-        priority: u8,
-        char_name: u32,
-        w: u32,
-        h: u32,
-        x: u32,
-        rely: u32,
-    ) {
+    fn render_normal_obj(&mut self, obj: &Obj, mosaic_w: u32, rely: u32) {
+        let (w, h) = obj.sizes().unwrap();
+        let x = obj.x() as u32;
+        let h_flip = obj.h_flip();
+        let color256 = obj.color256();
+        let char_name = obj.char_name() as u32;
+        let palette_num = obj.palette();
+        let mode = obj.mode() as u8;
+        let priority = obj.priority();
+
         let dim2 = !self.obj_format;
-        let dy = if !vflip { rely } else { h - 1 - rely };
+        let dy = if !obj.v_flip() { rely } else { h - 1 - rely };
 
         for relx in 0..w {
             let sx = (x + relx) % 512;
@@ -1114,7 +1121,7 @@ impl Lcd {
                 continue;
             }
 
-            let dx = if !hflip { relx } else { w - 1 - relx };
+            let dx = if !h_flip { relx } else { w - 1 - relx };
 
             let col_num = if !color256 {
                 let c = self.get_obj_pixel16(char_name, dx, dy, w, dim2);
@@ -1130,25 +1137,19 @@ impl Lcd {
         }
     }
 
-    fn render_rotate_obj(
-        &mut self,
-        rot_param_num: u8,
-        color_256: bool,
-        palette_num: u8,
-        mode: u8,
-        mosaic_w: u32,
-        priority: u8,
-        char_name: u32,
-        ow: u32,
-        oh: u32,
-        w: u32,
-        h: u32,
-        x: u32,
-        rely: u32,
-    ) {
+    fn render_rotate_obj(&mut self, obj: &Obj, mosaic_w: u32, rely: u32) {
         let dim2 = !self.obj_format;
+        let (ow, oh) = obj.raw_sizes().unwrap();
+        let (w, h) = obj.sizes().unwrap();
+        let rot_param_num = obj.rot_param() as usize;
+        let x = obj.x() as u32;
+        let color256 = obj.color256();
+        let char_name = obj.char_name() as u32;
+        let palette_num = obj.palette();
+        let mode = obj.mode() as u8;
+        let priority = obj.priority();
 
-        let rot_param_base = rot_param_num as usize * 32;
+        let rot_param_base = rot_param_num * 32;
         let rot_param = &self.oam[rot_param_base..rot_param_base + 32];
         let dx = i16::from_le_bytes(rot_param[6..8].try_into().unwrap()) as i32;
         let dmx = i16::from_le_bytes(rot_param[14..16].try_into().unwrap()) as i32;
@@ -1184,7 +1185,7 @@ impl Lcd {
             let rx2 = rx2 as u32;
             let ry2 = ry2 as u32;
 
-            let col_num = if !color_256 {
+            let col_num = if !color256 {
                 let col_num = self.get_obj_pixel16(char_name, rx2, ry2, ow, dim2);
                 if col_num != 0 {
                     palette_num * 16 + col_num

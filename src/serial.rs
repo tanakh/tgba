@@ -1,4 +1,4 @@
-use log::{debug, info, warn};
+use log::info;
 use serde::{Deserialize, Serialize};
 
 #[derive(Default, Serialize, Deserialize)]
@@ -48,19 +48,19 @@ impl Serial {
             // SIODATA
             0x120..=0x127 => {
                 let i = (addr - 0x120) as usize;
-                warn!("Read SIODATA[{i}]");
+                info!("Read SIODATA[{i}]");
                 0
             }
 
             // SIOCNT
             0x128 | 0x129 => {
                 // TODO
-                warn!("Read SIOCNT");
+                info!("Read SIOCNT");
                 0
             }
             // SIODATA
             0x12A | 0x12B => {
-                warn!("Read SIODATA8");
+                info!("Read SIODATA8");
                 0
             }
 
@@ -95,13 +95,13 @@ impl Serial {
             // SIODATA
             0x120..=0x127 => {
                 let i = (addr - 0x120) as usize;
-                warn!("SIODATA[{i}] = 0x{data:02X}");
+                info!("SIODATA[{i}] = 0x{data:02X}");
             }
 
             // SIOCNT
             0x128 | 0x129 => {
                 let i = (addr - 0x128) as usize;
-                warn!("SIOCNT[{i}] = 0x{data:02X}");
+                info!("SIOCNT[{i}] = 0x{data:02X}");
             }
 
             // SIODATA8
@@ -117,7 +117,7 @@ impl Serial {
                 self.irq_enable = data & 1 != 0;
                 self.communication_function = data >> 6;
 
-                debug!(
+                info!(
                     "Set communication function to: {}",
                     match self.communication_function {
                         0 | 1 => "Serial",

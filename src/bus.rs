@@ -1,7 +1,7 @@
-use std::{cmp::min, fmt::UpperHex, mem::size_of};
+use std::{array, cmp::min, fmt::UpperHex, mem::size_of};
 
 use bitvec::prelude::*;
-use log::{debug, trace, warn};
+use log::{debug, info, trace, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -139,7 +139,7 @@ impl Bus {
             ram,
             ext_ram,
 
-            dma: [0, 1, 2, 3].map(|ch| Dma::new(ch)),
+            dma: array::from_fn(Dma::new),
             dma_buf: 0,
             timers: Default::default(),
 
@@ -233,7 +233,7 @@ impl Bus {
                     self.last_successful_bios_read_addr = addr & !3;
                     Some(self.bios[addr as usize])
                 } else {
-                    warn!("Illegal BIOS address read: 0x{addr:08X}:8");
+                    info!("Illegal BIOS address read: 0x{addr:08X}:8");
                     let addr = self.last_successful_bios_read_addr + 4 + (addr & 3);
                     Some(self.bios[addr as usize])
                 }
@@ -295,7 +295,7 @@ impl Bus {
                     self.last_successful_bios_read_addr = addr & !3;
                     Some(read16(&self.bios, (addr & !1) as usize))
                 } else {
-                    warn!("Bad BIOS address read: 0x{addr:08X}:16");
+                    info!("Bad BIOS address read: 0x{addr:08X}:16");
                     let addr = self.last_successful_bios_read_addr + 4 + (addr & 2);
                     Some(read16(&self.bios, (addr & 0x3FFE) as usize))
                 }
@@ -355,7 +355,7 @@ impl Bus {
                     self.last_successful_bios_read_addr = addr & !3;
                     Some(read32(&self.bios, (addr & !3) as usize))
                 } else {
-                    warn!(
+                    info!(
                         "Bad BIOS address read: 0x{addr:08X}:32, cycle: {}, prev_success: 0x{:08X}",
                         ctx.now(),
                         self.last_successful_bios_read_addr
@@ -473,7 +473,7 @@ impl Bus {
         match addr >> 24 {
             0x0..=0x1 => {
                 // FIXME: ???
-                warn!("Write to BIOS: 0x{addr:08X}:8");
+                info!("Write to BIOS: 0x{addr:08X}:8");
             }
             0x2 => {
                 ctx.elapse(3);
@@ -527,7 +527,7 @@ impl Bus {
 
         match addr >> 24 {
             0x0..=0x1 => {
-                warn!("Write to BIOS: 0x{addr:08X}:16");
+                info!("Write to BIOS: 0x{addr:08X}:16");
             }
             0x2 => {
                 ctx.elapse(3);
@@ -588,7 +588,7 @@ impl Bus {
 
         match addr >> 24 {
             0x0..=0x1 => {
-                warn!("Write to BIOS: 0x{addr:08X}:32");
+                info!("Write to BIOS: 0x{addr:08X}:32");
             }
             0x2 => {
                 ctx.elapse(6);

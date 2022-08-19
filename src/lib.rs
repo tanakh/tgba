@@ -98,10 +98,7 @@ impl EmulatorCore for Agb {
     where
         Self: Sized,
     {
-        let bios = config
-            .bios
-            .as_ref()
-            .ok_or_else(|| Error::BiosNotSpecified)?;
+        let bios = config.bios.as_ref().ok_or(Error::BiosNotSpecified)?;
         let bios = fs::read(bios)?;
 
         let rom = Rom::from_bytes(data)?;
@@ -116,8 +113,8 @@ impl EmulatorCore for Agb {
         let rom = self.ctx.gamepak().rom();
 
         let rom_size = rom.data.len();
-        let rom_size = if rom_size < 1 * 1024 * 1024 {
-            format!("{} KiB", rom_size as f64 / 1024 as f64)
+        let rom_size = if rom_size < 1024 * 1024 {
+            format!("{} KiB", rom_size as f64 / 1024_f64)
         } else {
             format!("{} MiB", rom_size as f64 / (1024 * 1024) as f64)
         };

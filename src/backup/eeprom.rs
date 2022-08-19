@@ -24,19 +24,16 @@ pub enum EepromState {
 impl Eeprom {
     pub fn new(backup: Option<Vec<u8>>) -> Self {
         Self {
-            data: backup.map_or_else(
-                || vec![],
-                |data| {
-                    let data = data
-                        .chunks(8)
-                        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
-                        .collect::<Vec<u64>>();
-                    if !matches!(data.len() * 8, 512 | 8192) {
-                        error!("Invalid backup size: {:?}, expect 512B or 8KiB", data.len());
-                    }
-                    data
-                },
-            ),
+            data: backup.map_or_else(Vec::new, |data| {
+                let data = data
+                    .chunks(8)
+                    .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                    .collect::<Vec<u64>>();
+                if !matches!(data.len() * 8, 512 | 8192) {
+                    error!("Invalid backup size: {:?}, expect 512B or 8KiB", data.len());
+                }
+                data
+            }),
             state: EepromState::WaitForCommand { step: 0 },
         }
     }

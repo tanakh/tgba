@@ -134,10 +134,8 @@ fn match_id_string(s: &[u8], tag: &[u8]) -> bool {
             if s[i] != tag[i] {
                 return false;
             }
-        } else {
-            if s[i] < b'0' || s[i] > b'9' {
-                return false;
-            }
+        } else if s[i] < b'0' || s[i] > b'9' {
+            return false;
         }
     }
     true
