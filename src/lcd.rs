@@ -4,7 +4,7 @@ use std::cmp::min;
 
 use bitvec::prelude::*;
 use log::{info, trace};
-use meru_interface::{FrameBuffer, Pixel};
+use meru_interface::{Color, FrameBuffer};
 use modular_bitfield::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -724,7 +724,7 @@ impl Lcd {
 
         if self.force_blank {
             for x in 0..SCREEN_WIDTH as usize {
-                *self.frame_buffer.pixel_mut(x, self.y as _) = Pixel::new(255, 255, 255);
+                *self.frame_buffer.pixel_mut(x, self.y as _) = Color::new(255, 255, 255);
             }
             return;
         }
@@ -1480,8 +1480,8 @@ fn sign_extend(x: u32, sign: u32) -> i32 {
     (x << shift) as i32 >> shift
 }
 
-fn u16_to_pixel(p: u16) -> Pixel {
-    Pixel::new(
+fn u16_to_pixel(p: u16) -> Color {
+    Color::new(
         extend_color(p & 0x1F),
         extend_color((p >> 5) & 0x1F),
         extend_color((p >> 10) & 0x1F),

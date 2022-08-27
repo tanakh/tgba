@@ -19,10 +19,10 @@ use context::Context;
 pub use rom::Rom;
 
 use meru_interface::{
-    AudioBuffer, ConfigUi, CoreInfo, EmulatorCore, FrameBuffer, InputData, KeyConfig, Ui,
+    AudioBuffer, CoreInfo, EmulatorCore, File, FrameBuffer, InputData, KeyConfig,
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
 
 pub struct Agb {
     ctx: Context,
@@ -56,18 +56,9 @@ fn default_key_config() -> KeyConfig {
     }
 }
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, JsonSchema, Serialize, Deserialize)]
 pub struct Config {
-    bios: Option<PathBuf>,
-}
-
-impl ConfigUi for Config {
-    fn ui(&mut self, ui: &mut impl Ui) {
-        ui.file("BIOS:", &mut self.bios, &[("BIOS file", &["*"])]);
-        if self.bios.is_none() {
-            ui.label("BIOS must be specified");
-        }
-    }
+    bios: Option<File>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -98,8 +89,10 @@ impl EmulatorCore for Agb {
     where
         Self: Sized,
     {
-        let bios = config.bios.as_ref().ok_or(Error::BiosNotSpecified)?;
-        let bios = fs::read(bios)?;
+        let bios = {
+            let bios = config.bios.as_ref().ok_or(Error::BiosNotSpecified)?;
+            bios.data()?
+        };
 
         let rom = Rom::from_bytes(data)?;
 
