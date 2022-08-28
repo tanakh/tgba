@@ -58,6 +58,7 @@ fn default_key_config() -> KeyConfig {
 
 #[derive(Default, Clone, JsonSchema, Serialize, Deserialize)]
 pub struct Config {
+    /// BIOS file
     bios: Option<File>,
 }
 
